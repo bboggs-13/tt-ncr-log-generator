@@ -19,6 +19,9 @@ from openpyxl.drawing.image import Image as XLImage
 from openpyxl.drawing.spreadsheet_drawing import OneCellAnchor, AnchorMarker
 from openpyxl.drawing.xdr import XDRPositiveSize2D
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+from openpyxl.worksheet.datavalidation import DataValidation
+from openpyxl.formatting.rule import FormulaRule
+from openpyxl.utils import get_column_letter
 
 ASSETS = Path(__file__).parent / "assets"
 TEMPLATE_PATH = ASSETS / "TTFE_Template.xlsx"
@@ -48,6 +51,8 @@ CENTER_COLUMNS = [1, 2, 3, 4, 5, 8, 10, 11]  # A,B,C,D,E,H,J,K
 STATUS_COL = 8  # H
 OPEN_FILL = PatternFill(start_color="FFBDD7EE", end_color="FFBDD7EE", fill_type="solid")
 CLOSED_FILL = PatternFill(start_color="FFC6E0B4", end_color="FFC6E0B4", fill_type="solid")
+INPROGRESS_FILL = PatternFill(start_color="FFFFE699", end_color="FFFFE699", fill_type="solid")
+STATUS_OPTIONS = ["Open", "In Progress", "Closed"]
 
 # Borders: thin on every data cell, thick around the title and header row.
 _THIN = Side(style="thin", color="FF000000")
@@ -110,15 +115,8 @@ def build_workbook(df: pd.DataFrame, project_name: str = "134 Jane Street") -> b
             if field in df.columns:
                 ws[f"{col_letter}{r}"] = _coerce(row[field])
 
-    # Status highlight
-    for i in range(n):
-        r = DATA_START_ROW + i
-        cell = ws.cell(r, STATUS_COL)
-        s = str(cell.value or "").strip().lower()
-        if s == "open":
-            cell.fill = OPEN_FILL
-        elif s in ("closed", "close"):
-            cell.fill = CLOSED_FILL
+    # Status highlight is applied via conditional formatting below so it
+    # repaints live when a user changes the dropdown value in Excel.
 
     # Center fixed columns
     for i in range(n):
@@ -145,6 +143,42 @@ def build_workbook(df: pd.DataFrame, project_name: str = "134 Jane Street") -> b
             f = cell.font
             cell.font = Font(name=f.name, size=FONT_SIZE, bold=f.bold,
                              italic=f.italic, color=f.color, underline=f.underline)
+
+    # Filter on the header row so users can filter/sort by Status (and any column)
+    last_row = DATA_START_ROW + n - 1
+    last_col_letter = get_column_letter(LAST_COL)
+    ws.auto_filter.ref = f"A{HEADER_ROW}:{last_col_letter}{last_row}"
+
+    # Dropdown on the Status column: Open / In Progress / Closed
+    status_letter = get_column_letter(STATUS_COL)
+    dv = DataValidation(
+        type="list",
+        formula1='"' + ",".join(STATUS_OPTIONS) + '"',
+        allow_blank=True,
+        showDropDown=False,
+    )
+    dv.error = "Choose Open, In Progress, or Closed."
+    dv.errorTitle = "Invalid status"
+    dv.prompt = "Select a status"
+    ws.add_data_validation(dv)
+    dv.add(f"{status_letter}{DATA_START_ROW}:{status_letter}{last_row}")
+
+    # Live highlighting: conditional formatting recolors the Status cell
+    # instantly when the dropdown value changes in Excel (case-insensitive).
+    status_range = f"{status_letter}{DATA_START_ROW}:{status_letter}{last_row}"
+    top = f"{status_letter}{DATA_START_ROW}"
+    ws.conditional_formatting.add(
+        status_range,
+        FormulaRule(formula=[f'EXACT(LOWER(TRIM({top})),"open")'], fill=OPEN_FILL, stopIfTrue=True),
+    )
+    ws.conditional_formatting.add(
+        status_range,
+        FormulaRule(formula=[f'EXACT(LOWER(TRIM({top})),"in progress")'], fill=INPROGRESS_FILL, stopIfTrue=True),
+    )
+    ws.conditional_formatting.add(
+        status_range,
+        FormulaRule(formula=[f'EXACT(LOWER(TRIM({top})),"closed")'], fill=CLOSED_FILL, stopIfTrue=True),
+    )
 
     # Logo, exactly 3in wide, top-left corner
     from PIL import Image as PILImage
