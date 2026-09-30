@@ -15,9 +15,24 @@ from pathlib import Path
 import streamlit as st
 from PIL import Image
 
+import base64
+
 import engine
 
 _ICON = Image.open(Path(engine.ASSETS) / "tt_icon.png")
+
+def _icon_b64(name):
+    return base64.b64encode((Path(engine.ASSETS) / name).read_bytes()).decode()
+
+_PAPERCLIP_B64 = _icon_b64("paperclip.png")
+_BUILDING_B64 = _icon_b64("building.png")
+
+def field_label(icon_b64, text):
+    st.markdown(
+        f'<div class="tt-field-label">'
+        f'<img src="data:image/png;base64,{icon_b64}"/> {text}</div>',
+        unsafe_allow_html=True,
+    )
 
 st.set_page_config(
     page_title="TT NCR Log Generator",
@@ -75,6 +90,14 @@ st.markdown(
       .stDownloadButton button, .stButton button { font-weight: 700; letter-spacing: 0.01em; }
       .stDownloadButton button:hover, .stButton button:hover { filter: brightness(0.93); }
 
+      /* Icon + text labels for the input fields */
+      .tt-field-label {
+        display: flex; align-items: center; gap: 8px;
+        font-size: 0.9rem; font-weight: 600; color: var(--tt-ink);
+        margin: 0.5rem 0 0.35rem;
+      }
+      .tt-field-label img { height: 20px; width: 20px; object-fit: contain; }
+
       /* Keep the logo fully visible: square edges, no crop */
       [data-testid="stImage"] img, .stImage img {
         border-radius: 0 !important;
@@ -88,8 +111,8 @@ st.markdown(
 
 # --- Header ---
 st.image(str(engine.LOGO_PATH), width=280)
-st.markdown('<div class="tt-eyebrow">Façade Engineering</div>', unsafe_allow_html=True)
-st.title("NCR Log Converter")
+st.markdown('<div class="tt-eyebrow">Façade Engineering · Quality Control</div>', unsafe_allow_html=True)
+st.title("NCR Log Generator")
 st.markdown('<hr class="tt-rule">', unsafe_allow_html=True)
 st.caption(
     "Upload a PlanRadar Non-Conformance / Special-Inspections CSV export. "
@@ -101,9 +124,17 @@ with st.expander("Expected CSV columns"):
     st.write(", ".join(engine.COLUMN_MAP.keys()))
     st.write(f"**Required:** {', '.join(engine.REQUIRED_COLUMNS)}")
 
-project = st.text_input("Project name (written to cell A4)", value="134 Jane Street")
+field_label(_BUILDING_B64, "Project name (written to cell A4)")
+project = st.text_input(
+    "Project name (written to cell A4)",
+    value="134 Jane Street",
+    label_visibility="collapsed",
+)
 
-uploaded = st.file_uploader("Upload CSV", type=["csv"])
+field_label(_PAPERCLIP_B64, "Upload CSV")
+uploaded = st.file_uploader(
+    "Upload CSV", type=["csv"], label_visibility="collapsed"
+)
 
 if uploaded is not None:
     csv_bytes = uploaded.getvalue()
