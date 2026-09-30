@@ -124,7 +124,7 @@ with st.expander("Expected CSV columns"):
     st.write(", ".join(engine.COLUMN_MAP.keys()))
     st.write(f"**Required:** {', '.join(engine.REQUIRED_COLUMNS)}")
 
-field_label(_BUILDING_B64, "Project name (written to cell A4)")
+field_label(_BUILDING_B64, "Project name")
 project = st.text_input(
     "Project name (written to cell A4)",
     value="134 Jane Street",
