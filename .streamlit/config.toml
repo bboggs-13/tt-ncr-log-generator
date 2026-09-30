@@ -4,7 +4,7 @@
 [theme]
 base = "light"
 primaryColor = "#D4451D"                 # terra cotta — interactive elements & highlights
-backgroundColor = "#FFFFFF"              # warm off-white (Anthropic cream)
+backgroundColor = "#FAFAFA"              # warm off-white (Anthropic cream)
 secondaryBackgroundColor = "#F0EDE4"     # deeper warm neutral for widgets/cards
 textColor = "#76767B"                    # cool gray body text
 linkColor = "#8B9064"                    # olive links
