@@ -89,7 +89,7 @@ st.markdown(
 # --- Header ---
 st.image(str(engine.LOGO_PATH), width=280)
 st.markdown('<div class="tt-eyebrow">Façade Engineering</div>', unsafe_allow_html=True)
-st.title("NCR Log Generator")
+st.title("NCR Log Converter")
 st.markdown('<hr class="tt-rule">', unsafe_allow_html=True)
 st.caption(
     "Upload a PlanRadar Non-Conformance / Special-Inspections CSV export. "
