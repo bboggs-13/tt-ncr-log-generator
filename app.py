@@ -4,19 +4,28 @@ Upload a PlanRadar NCR / Special-Inspections CSV, download the formatted
 Thornton Tomasetti Excel log. Template, logo, mapping, and formatting are
 built in — the user only provides the CSV.
 
-Theme: Anthropic-inspired warm light look with TT brand colors
-(olive #8B9064, terra cotta #D4451D, cool-gray text #76767B) in
-.streamlit/config.toml. This file adds a few brand accents on top.
+Styling mirrors the Thornton Tomasetti website: warm cream canvas, bold
+headings, olive (#8B9064) + terra cotta (#D4451D) accents, cool-gray body
+text (#76767B). Theme base lives in .streamlit/config.toml.
 
 Run locally:   streamlit run app.py
 """
+from pathlib import Path
+
 import streamlit as st
+from PIL import Image
 
 import engine
 
-st.set_page_config(page_title="TT NCR Log Generator", page_icon="🧱", layout="centered")
+_ICON = Image.open(Path(engine.ASSETS) / "tt_icon.png")
 
-# --- Brand accents (headings olive, title terra cotta, warm spacing) ---
+st.set_page_config(
+    page_title="TT NCR Log Generator",
+    page_icon=_ICON,
+    layout="centered",
+)
+
+# --- TT-website-inspired styling ---
 st.markdown(
     """
     <style>
@@ -24,31 +33,68 @@ st.markdown(
         --tt-olive: #8B9064;
         --tt-terra: #D4451D;
         --tt-gray:  #76767B;
+        --tt-ink:   #1A1A17;
+        --tt-cream: #FAF9F5;
       }
-      .block-container { padding-top: 3rem; max-width: 820px; }
-      h1 { color: var(--tt-terra) !important; font-weight: 700; letter-spacing: -0.01em; }
-      h2, h3 { color: var(--tt-olive) !important; font-weight: 600; }
-      /* Thin olive rule under the header block */
-      .tt-divider { height: 3px; background: var(--tt-olive); border: none;
-                    opacity: 0.35; margin: 0.25rem 0 1.5rem; border-radius: 2px; }
-      /* Metric values in terra cotta */
-      [data-testid="stMetricValue"] { color: var(--tt-terra) !important; }
-      /* Primary buttons already use terra cotta via primaryColor;
-         make hover a touch darker */
+      .block-container { padding-top: 3.5rem; max-width: 860px; }
+
+      /* Small uppercase category label, like the TT site's NEWS / INSIGHT tags */
+      .tt-eyebrow {
+        color: var(--tt-terra);
+        font-size: 0.75rem;
+        font-weight: 700;
+        letter-spacing: 0.18em;
+        text-transform: uppercase;
+        margin: 0.75rem 0 0.25rem;
+      }
+      /* Big bold near-black headline, TT-style */
+      h1 {
+        color: var(--tt-ink) !important;
+        font-weight: 800 !important;
+        letter-spacing: -0.02em;
+        line-height: 1.05;
+      }
+      h2, h3 {
+        color: var(--tt-ink) !important;
+        font-weight: 700 !important;
+        letter-spacing: -0.01em;
+      }
+      /* Section labels get an olive tint to echo the wordmark */
+      h3 { color: var(--tt-olive) !important; text-transform: none; }
+
+      /* Terra-cotta rule under the header, echoing the site's accent bars */
+      .tt-rule { height: 4px; width: 64px; background: var(--tt-terra);
+                 border: none; margin: 1rem 0 1.5rem; border-radius: 2px; }
+
+      /* Metric values in terra cotta, labels in olive */
+      [data-testid="stMetricValue"] { color: var(--tt-terra) !important; font-weight: 800; }
+      [data-testid="stMetricLabel"] { color: var(--tt-olive) !important;
+                 text-transform: uppercase; letter-spacing: 0.08em; font-size: 0.72rem; }
+
+      /* Buttons: use primaryColor (terra cotta); darken slightly on hover */
+      .stDownloadButton button, .stButton button { font-weight: 700; letter-spacing: 0.01em; }
       .stDownloadButton button:hover, .stButton button:hover { filter: brightness(0.93); }
+
+      /* Keep the logo fully visible: square edges, no crop */
+      [data-testid="stImage"] img, .stImage img {
+        border-radius: 0 !important;
+        object-fit: contain !important;
+        clip-path: none !important;
+      }
     </style>
     """,
     unsafe_allow_html=True,
 )
 
 # --- Header ---
-st.image(str(engine.LOGO_PATH), width=260)
+st.image(str(engine.LOGO_PATH), width=280)
+st.markdown('<div class="tt-eyebrow">Façade Engineering · Quality Control</div>', unsafe_allow_html=True)
 st.title("NCR Log Generator")
-st.markdown('<hr class="tt-divider">', unsafe_allow_html=True)
+st.markdown('<hr class="tt-rule">', unsafe_allow_html=True)
 st.caption(
     "Upload a PlanRadar Non-Conformance / Special-Inspections CSV export. "
     "The app fills the standard TT template — formatting, Status highlighting, "
-    "column centering, and logo included — and gives you a ready-to-send Excel file."
+    "column centering, and logo included — and returns a ready-to-send Excel file."
 )
 
 with st.expander("Expected CSV columns"):
