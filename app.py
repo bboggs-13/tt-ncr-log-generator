@@ -111,7 +111,7 @@ st.markdown(
 
 # --- Header ---
 st.image(str(engine.LOGO_PATH), width=280)
-st.markdown('<div class="tt-eyebrow">Façade Engineering · Quality Control</div>', unsafe_allow_html=True)
+st.markdown('<div class="tt-eyebrow">Façade Engineering</div>', unsafe_allow_html=True)
 st.title("NCR Log Generator")
 st.markdown('<hr class="tt-rule">', unsafe_allow_html=True)
 st.caption(
