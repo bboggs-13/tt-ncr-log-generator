@@ -15,7 +15,6 @@ st.set_page_config(page_title="TT NCR Log Generator", page_icon="🧱", layout="
 # --- Header ---
 st.image(str(engine.LOGO_PATH), width=260)
 st.title("NCR Log Generator")
-[theme]
 textColor="RGB(189, 190, 192)"
 st.caption(
     "Upload a PlanRadar Non-Conformance / Special-Inspections CSV export. "
