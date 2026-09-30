@@ -18,7 +18,7 @@ from openpyxl import load_workbook
 from openpyxl.drawing.image import Image as XLImage
 from openpyxl.drawing.spreadsheet_drawing import OneCellAnchor, AnchorMarker
 from openpyxl.drawing.xdr import XDRPositiveSize2D
-from openpyxl.styles import Alignment, PatternFill
+from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 
 ASSETS = Path(__file__).parent / "assets"
 TEMPLATE_PATH = ASSETS / "TTFE_Template.xlsx"
@@ -48,6 +48,16 @@ CENTER_COLUMNS = [1, 2, 3, 4, 5, 8, 10, 11]  # A,B,C,D,E,H,J,K
 STATUS_COL = 8  # H
 OPEN_FILL = PatternFill(start_color="FFBDD7EE", end_color="FFBDD7EE", fill_type="solid")
 CLOSED_FILL = PatternFill(start_color="FFC6E0B4", end_color="FFC6E0B4", fill_type="solid")
+
+# Borders: thin on every data cell, thick around the title and header row.
+_THIN = Side(style="thin", color="FF000000")
+_THICK = Side(style="thick", color="FF000000")
+THIN_BORDER = Border(left=_THIN, right=_THIN, top=_THIN, bottom=_THIN)
+THICK_BORDER = Border(left=_THICK, right=_THICK, top=_THICK, bottom=_THICK)
+FIRST_COL, LAST_COL = 1, 11  # A..K
+FONT_SIZE = 10.0
+TITLE_ROW = 4
+DATE_ROW = 5
 
 LOGO_WIDTH_IN = 3.0
 EMU_PER_IN = 914400
@@ -120,6 +130,21 @@ def build_workbook(df: pd.DataFrame, project_name: str = "134 Jane Street") -> b
                 horizontal="center", vertical="center",
                 wrap_text=al.wrap_text, text_rotation=al.text_rotation, indent=al.indent,
             )
+
+    # Borders: thin on all data cells; thick on header row 7 only
+    for r in range(DATA_START_ROW, DATA_START_ROW + n):
+        for c in range(FIRST_COL, LAST_COL + 1):
+            ws.cell(r, c).border = THIN_BORDER
+    for c in range(FIRST_COL, LAST_COL + 1):
+        ws.cell(HEADER_ROW, c).border = THICK_BORDER
+
+    # Font: 10pt everywhere (title, headers, data), preserving bold/name/color
+    for r in range(TITLE_ROW, DATA_START_ROW + n):
+        for c in range(FIRST_COL, LAST_COL + 1):
+            cell = ws.cell(r, c)
+            f = cell.font
+            cell.font = Font(name=f.name, size=FONT_SIZE, bold=f.bold,
+                             italic=f.italic, color=f.color, underline=f.underline)
 
     # Logo, exactly 3in wide, top-left corner
     from PIL import Image as PILImage
