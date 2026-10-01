@@ -53,10 +53,12 @@ EMU_PER_IN = 914400
 
 # Alternate CSV header names accepted for a given logical field (first match wins).
 ALIASES = {
+    "Report #": ["Report", "Report No", "Report No.", "Report Number", "Report#"],
     "Non-Conformance #": ["Item #", "Item", "Observation #", "Inspection #", "Issue #"],
     "Responsible Party": ["Responsible", "Party Responsible", "Responsible party",
                           "Trade", "Contractor", "Assigned to"],
 }
+
 
 @dataclass(frozen=True)
 class Profile:
@@ -68,6 +70,7 @@ class Profile:
     center_columns: list          # 1-based column indices to center
     status_col: int               # 1-based index of the Status column
     last_col: int                 # 1-based index of the last column
+
 
 PROFILES = {
     "special": Profile(
@@ -101,8 +104,10 @@ PROFILES = {
 }
 DEFAULT_PROFILE = "special"
 
+
 def get_profile(key: str) -> Profile:
     return PROFILES.get(key, PROFILES[DEFAULT_PROFILE])
+
 
 def _resolve_field(field_name: str, df: pd.DataFrame):
     """Return the actual CSV column for a logical field, honoring aliases."""
@@ -112,6 +117,7 @@ def _resolve_field(field_name: str, df: pd.DataFrame):
         if alt in df.columns:
             return alt
     return None
+
 
 def _coerce(val):
     s = str(val).replace(",", "").replace("$", "").strip()
@@ -123,8 +129,10 @@ def _coerce(val):
     except ValueError:
         return val
 
+
 def expected_columns(profile: Profile) -> list:
     return list(profile.column_map.keys())
+
 
 def validate(df: pd.DataFrame, profile: Profile):
     msgs = []
@@ -143,6 +151,7 @@ def validate(df: pd.DataFrame, profile: Profile):
         msgs.append(f"Note: unmapped columns will be ignored: {', '.join(unknown)}")
     ok = not missing and not df.empty
     return ok, msgs
+
 
 def build_workbook(df: pd.DataFrame, profile: Profile, project_name: str = "134 Jane Street") -> bytes:
     wb = load_workbook(ASSETS / profile.template)
@@ -241,6 +250,7 @@ def build_workbook(df: pd.DataFrame, profile: Profile, project_name: str = "134 
     buf = io.BytesIO()
     wb.save(buf)
     return buf.getvalue()
+
 
 def process_csv_bytes(csv_bytes: bytes, inspection_type: str = DEFAULT_PROFILE,
                       project_name: str = "134 Jane Street"):
