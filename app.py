@@ -26,6 +26,7 @@ def _icon_b64(name):
 
 _PAPERCLIP_B64 = _icon_b64("paperclip.png")
 _BUILDING_B64 = _icon_b64("building.png")
+_MAGNIFIER_B64 = _icon_b64("clipboard.png")
 
 def field_label(icon_b64, text):
     st.markdown(
@@ -111,7 +112,7 @@ st.markdown(
 
 # --- Header ---
 st.image(str(engine.LOGO_PATH), width=280)
-st.markdown('<div class="tt-eyebrow">Façade Engineering</div>', unsafe_allow_html=True)
+st.markdown('<div class="tt-eyebrow">Façade Engineering · Quality Control</div>', unsafe_allow_html=True)
 st.title("NCR Log Generator")
 st.markdown('<hr class="tt-rule">', unsafe_allow_html=True)
 st.caption(
@@ -120,11 +121,29 @@ st.caption(
     "column centering, and logo included — and returns a ready-to-send Excel file."
 )
 
-with st.expander("Expected CSV columns"):
-    st.write(", ".join(engine.COLUMN_MAP.keys()))
-    st.write(f"**Required:** {', '.join(engine.REQUIRED_COLUMNS)}")
+# Inspection type selector (drives which template/columns are used)
+field_label(_MAGNIFIER_B64, "Inspection type")
+_type_keys = list(engine.PROFILES.keys())
+_type_labels = {k: engine.PROFILES[k].label for k in _type_keys}
+try:
+    insp_type = st.segmented_control(
+        "Inspection type", options=_type_keys,
+        format_func=lambda k: _type_labels[k],
+        default=engine.DEFAULT_PROFILE, label_visibility="collapsed",
+    ) or engine.DEFAULT_PROFILE
+except AttributeError:
+    insp_type = st.radio(
+        "Inspection type", options=_type_keys,
+        format_func=lambda k: _type_labels[k],
+        horizontal=True, label_visibility="collapsed",
+    )
 
-field_label(_BUILDING_B64, "Project name")
+_profile = engine.get_profile(insp_type)
+with st.expander(f"Expected CSV columns — {_profile.label}"):
+    st.write(", ".join(engine.expected_columns(_profile)))
+    st.write(f"**Required:** {', '.join(_profile.required_columns)}")
+
+field_label(_BUILDING_B64, "Project name (written to cell A4)")
 project = st.text_input(
     "Project name (written to cell A4)",
     value="134 Jane Street",
@@ -139,7 +158,10 @@ uploaded = st.file_uploader(
 if uploaded is not None:
     csv_bytes = uploaded.getvalue()
     try:
-        xlsx, df, msgs = engine.process_csv_bytes(csv_bytes, project_name=project.strip() or "134 Jane Street")
+        xlsx, df, msgs = engine.process_csv_bytes(
+            csv_bytes, inspection_type=insp_type,
+            project_name=project.strip() or "134 Jane Street",
+        )
     except Exception as e:  # noqa: BLE001
         st.error(f"Could not read the CSV: {e}")
         st.stop()
@@ -172,7 +194,8 @@ if uploaded is not None:
     c3.metric("In Progress", inprog_n)
     c4.metric("Closed", closed_n)
 
-    out_name = f"{(project.strip() or 'NCR').replace(' ', '_')}_NCR_Log.xlsx"
+    _suffix = "NCR_Log" if insp_type == "special" else "Site_Inspection_Log"
+    out_name = f"{(project.strip() or 'TT').replace(' ', '_')}_{_suffix}.xlsx"
     st.download_button(
         "⬇ Download completed Excel workbook",
         data=xlsx,
