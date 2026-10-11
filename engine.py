@@ -213,10 +213,13 @@ def _apply_age_highlight(ws, profile, n, last_row, last_col_letter):
     if n > 0:
         rng = f"A{DATA_START_ROW}:{last_col_letter}{last_row}"
         age = f"($C$5-${obs_letter}{DATA_START_ROW})"
+        # Only items that are still open get aged; Closed items are never shaded.
+        st_cell = f"LOWER(TRIM(${get_column_letter(profile.status_col)}{DATA_START_ROW}))"
+        not_closed = f'{st_cell}<>"closed",{st_cell}<>"close"'
         for lo, hi, _label, fill in AGE_BANDS:
             cond = f"{age}>={lo}" if hi is None else f"{age}>={lo},{age}<{hi}"
             ws.conditional_formatting.add(rng, FormulaRule(
-                formula=[f"AND(ISNUMBER(${obs_letter}{DATA_START_ROW}),{cond})"], fill=fill))
+                formula=[f"AND(ISNUMBER(${obs_letter}{DATA_START_ROW}),{not_closed},{cond})"], fill=fill))
 
     _write_age_legend(ws)
 
@@ -227,7 +230,7 @@ def _write_age_legend(ws):
     Colours come from AGE_BANDS, so the key always matches the highlighting rules.
     """
     head = ws["E1"]
-    head.value = "Legend: Days Since Observation Date (as of Date Updated)"
+    head.value = "Legend: Days Since Observation Date, Open Items Only (as of Date Updated)"
     head.font = Font(name="Arial", size=10, bold=True)
     head.alignment = Alignment(horizontal="left", vertical="center")
     head.border = THIN_BORDER
