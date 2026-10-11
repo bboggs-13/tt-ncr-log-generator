@@ -80,6 +80,7 @@ class Profile:
     status_col: int               # 1-based index of the Status column
     last_col: int                 # 1-based index of the last column
     age_highlight: bool = False   # Time Sensitive: shade rows by age of Observation Date
+    legend_cols: tuple = ("E", "F")  # Time Sensitive legend: (swatch column, label column)
 
 
 PROFILES = {
@@ -126,6 +127,22 @@ PROFILES = {
         status_col=7,
         last_col=9,
     ),
+    "regular_time": Profile(
+        key="regular_time",
+        label="Regular Site Inspections — Time Sensitive Site Inspection Log",
+        template="TTFE_Template_Regular_TimeSensitive.xlsx",
+        column_map={
+            "Report #": "A", "Non-Conformance #": "B", "Observation Date": "C",
+            "Responsible Party": "D", "Description": "E", "Recommended Action": "F",
+            "Status": "G", "Remarks": "H", "Date Closed": "I",
+        },
+        required_columns=["Observation Date", "Status"],
+        center_columns=[1, 2, 3, 4, 7, 9],
+        status_col=7,
+        last_col=9,
+        age_highlight=True,
+        legend_cols=("D", "E"),  # narrow Responsible Party column holds the swatches
+    ),
 }
 DEFAULT_PROFILE = "special"
 
@@ -133,6 +150,8 @@ DEFAULT_PROFILE = "special"
 INSPECTION_TYPES = {"special": "Special Inspections", "regular": "Regular Site Inspections"}
 LOG_VARIANTS = {
     "special": {"Standard NCR Log": "special", "Time Sensitive NCR Log": "special_time"},
+    "regular": {"Standard Site Inspection Log": "regular",
+                "Time Sensitive Site Inspection Log": "regular_time"},
 }
 
 
@@ -200,7 +219,6 @@ def _apply_age_highlight(ws, profile, n, last_row, last_col_letter):
     gen = date.today()
     ws["C5"] = gen
     ws["C5"].number_format = DATE_FMT
-    ws["F4"] = None  # no title on the sheet; the log type is shown in the app only
 
     obs_letter = profile.column_map["Observation Date"]
     for r in range(DATA_START_ROW, DATA_START_ROW + n):
@@ -221,27 +239,29 @@ def _apply_age_highlight(ws, profile, n, last_row, last_col_letter):
             ws.conditional_formatting.add(rng, FormulaRule(
                 formula=[f"AND(ISNUMBER(${obs_letter}{DATA_START_ROW}),{not_closed},{cond})"], fill=fill))
 
-    _write_age_legend(ws)
+    _write_age_legend(ws, profile)
 
 
-def _write_age_legend(ws):
-    """Colour key in E1:F5: a swatch in column E with its meaning in column F.
+def _write_age_legend(ws, profile):
+    """Colour key in rows 1-5: swatch in one column, meaning in the next.
 
-    Colours come from AGE_BANDS, so the key always matches the highlighting rules.
+    Special uses E1:F5, Regular uses D1:E5 (see Profile.legend_cols). Colours come
+    from AGE_BANDS, so the key always matches the highlighting rules.
     """
-    head = ws["E1"]
+    sw_col, lab_col = profile.legend_cols
+    head = ws[f"{sw_col}1"]
     head.value = "Legend: Days Since Observation Date, Open Items Only (as of Date Updated)"
     head.font = Font(name="Arial", size=10, bold=True)
     head.alignment = Alignment(horizontal="left", vertical="center")
     head.border = THIN_BORDER
-    ws.merge_cells("E1:F1")
+    ws.merge_cells(f"{sw_col}1:{lab_col}1")
 
     rows = [("Less than 30 days (no highlight)", None)]
     for lo, hi, _label, fill in AGE_BANDS:
         rows.append((f"{lo} to {hi - 1} days" if hi else f"{lo}+ days", fill))
 
     for r, (text, fill) in enumerate(rows, start=2):
-        swatch, label = ws[f"E{r}"], ws[f"F{r}"]
+        swatch, label = ws[f"{sw_col}{r}"], ws[f"{lab_col}{r}"]
         swatch.border = THIN_BORDER
         if fill is not None:
             swatch.fill = fill
