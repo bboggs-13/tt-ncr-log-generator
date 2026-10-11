@@ -112,7 +112,7 @@ st.markdown(
 
 # --- Header ---
 st.image(str(engine.LOGO_PATH), width=280)
-st.markdown('<div class="tt-eyebrow">Façade Engineering</div>', unsafe_allow_html=True)
+st.markdown('<div class="tt-eyebrow">Façade Engineering · Quality Control</div>', unsafe_allow_html=True)
 st.title("NCR Log Generator")
 st.markdown('<hr class="tt-rule">', unsafe_allow_html=True)
 st.caption(
@@ -123,8 +123,8 @@ st.caption(
 
 # Inspection type selector (drives which template/columns are used)
 field_label(_MAGNIFIER_B64, "Inspection type")
-_type_keys = list(engine.PROFILES.keys())
-_type_labels = {k: engine.PROFILES[k].label for k in _type_keys}
+_type_keys = list(engine.INSPECTION_TYPES.keys())
+_type_labels = dict(engine.INSPECTION_TYPES)
 try:
     insp_type = st.segmented_control(
         "Inspection type", options=_type_keys,
@@ -138,7 +138,23 @@ except AttributeError:
         horizontal=True, label_visibility="collapsed",
     )
 
-_profile = engine.get_profile(insp_type)
+# Log type dropdown (Standard vs Time Sensitive) for each inspection type
+log_variant = None
+if insp_type in engine.LOG_VARIANTS:
+    field_label(_MAGNIFIER_B64, "Log type")
+    log_variant = st.selectbox(
+        "Log type", options=list(engine.LOG_VARIANTS[insp_type].keys()),
+        index=0, label_visibility="collapsed", key=f"log_type_{insp_type}",
+    )
+    if engine.get_profile(engine.resolve_profile_key(insp_type, log_variant)).age_highlight:
+        st.caption(
+            "Open items are shaded by days since the Observation Date, measured from the "
+            "log's Date Updated: under 30 none · 30–59 yellow · 60–89 orange · 90+ red. "
+            "Closed items are not shaded."
+        )
+profile_key = engine.resolve_profile_key(insp_type, log_variant)
+
+_profile = engine.get_profile(profile_key)
 with st.expander(f"Expected CSV columns — {_profile.label}"):
     st.write(", ".join(engine.expected_columns(_profile)))
     st.write(f"**Required:** {', '.join(_profile.required_columns)}")
@@ -159,7 +175,7 @@ if uploaded is not None:
     csv_bytes = uploaded.getvalue()
     try:
         xlsx, df, msgs = engine.process_csv_bytes(
-            csv_bytes, inspection_type=insp_type,
+            csv_bytes, inspection_type=profile_key,
             project_name=project.strip() or "134 Jane Street",
         )
     except Exception as e:  # noqa: BLE001
@@ -194,7 +210,12 @@ if uploaded is not None:
     c3.metric("In Progress", inprog_n)
     c4.metric("Closed", closed_n)
 
-    _suffix = "NCR_Log" if insp_type == "special" else "Site_Inspection_Log"
+    _suffix = {
+        "special": "NCR_Log",
+        "special_time": "Time_Sensitive_NCR_Log",
+        "regular": "Site_Inspection_Log",
+        "regular_time": "Time_Sensitive_Site_Inspection_Log",
+    }.get(profile_key, "Log")
     out_name = f"{(project.strip() or 'TT').replace(' ', '_')}_{_suffix}.xlsx"
     st.download_button(
         "⬇ Download completed Excel workbook",
