@@ -42,6 +42,15 @@ CLOSED_FILL = PatternFill(start_color="FFC6E0B4", end_color="FFC6E0B4", fill_typ
 INPROGRESS_FILL = PatternFill(start_color="FFFFE699", end_color="FFFFE699", fill_type="solid")
 STATUS_OPTIONS = ["Open", "In Progress", "Closed"]
 
+# Time Sensitive NCR Log: age bands measured from the log's "Date Updated" (C5).
+# (min_days, max_days or None, label, fill) — muted, incrementally stronger tones.
+AGE_BANDS = [
+    (30, 60, "30–60 days", PatternFill(start_color="FFFFF2CC", end_color="FFFFF2CC", fill_type="solid")),
+    (60, 90, "60–90 days", PatternFill(start_color="FFF8CBAD", end_color="FFF8CBAD", fill_type="solid")),
+    (90, None, "90+ days", PatternFill(start_color="FFF0A8A8", end_color="FFF0A8A8", fill_type="solid")),
+]
+DATE_FMT = "yyyy-mm-dd"
+
 # Borders
 _THIN = Side(style="thin", color="FF000000")
 _THICK = Side(style="thick", color="FF000000")
@@ -70,6 +79,7 @@ class Profile:
     center_columns: list          # 1-based column indices to center
     status_col: int               # 1-based index of the Status column
     last_col: int                 # 1-based index of the last column
+    age_highlight: bool = False   # Time Sensitive: shade rows by age of Observation Date
 
 
 PROFILES = {
@@ -87,6 +97,21 @@ PROFILES = {
         status_col=8,
         last_col=11,
     ),
+    "special_time": Profile(
+        key="special_time",
+        label="Special Inspections — Time Sensitive NCR Log",
+        template="TTFE_Template_TimeSensitive.xlsx",
+        column_map={
+            "Report #": "A", "Non-Conformance #": "B", "Observation Date": "C",
+            "Type": "D", "Priority": "E", "Description": "F", "Recommended Action": "G",
+            "Status": "H", "Remarks": "I", "Date Closed": "J", "Link to ticket": "K",
+        },
+        required_columns=["Report #", "Non-Conformance #", "Observation Date", "Type", "Status"],
+        center_columns=[1, 2, 3, 4, 5, 8, 10, 11],
+        status_col=8,
+        last_col=11,
+        age_highlight=True,
+    ),
     "regular": Profile(
         key="regular",
         label="Regular Site Inspections",
@@ -103,6 +128,19 @@ PROFILES = {
     ),
 }
 DEFAULT_PROFILE = "special"
+
+# What the UI shows: inspection types, and (optionally) log variants within a type.
+INSPECTION_TYPES = {"special": "Special Inspections", "regular": "Regular Site Inspections"}
+LOG_VARIANTS = {
+    "special": {"Standard NCR Log": "special", "Time Sensitive NCR Log": "special_time"},
+}
+
+
+def resolve_profile_key(inspection_type: str, log_variant: str | None = None) -> str:
+    variants = LOG_VARIANTS.get(inspection_type)
+    if variants and log_variant in variants:
+        return variants[log_variant]
+    return inspection_type
 
 
 def get_profile(key: str) -> Profile:
@@ -151,6 +189,63 @@ def validate(df: pd.DataFrame, profile: Profile):
         msgs.append(f"Note: unmapped columns will be ignored: {', '.join(unknown)}")
     ok = not missing and not df.empty
     return ok, msgs
+
+
+def _apply_age_highlight(ws, profile, n, last_row, last_col_letter):
+    """Shade whole data rows by days between Observation Date and Date Updated (C5).
+
+    C5 and the Observation Date cells are written as real dates so Excel can do the
+    math; editing C5 later re-ages the log automatically.
+    """
+    gen = date.today()
+    ws["C5"] = gen
+    ws["C5"].number_format = DATE_FMT
+    ws["F4"] = None  # no title on the sheet; the log type is shown in the app only
+
+    obs_letter = profile.column_map["Observation Date"]
+    for r in range(DATA_START_ROW, DATA_START_ROW + n):
+        cell = ws[f"{obs_letter}{r}"]
+        parsed = pd.to_datetime(cell.value, errors="coerce") if cell.value not in (None, "") else pd.NaT
+        if not pd.isna(parsed):
+            cell.value = parsed.date()
+            cell.number_format = DATE_FMT
+
+    if n > 0:
+        rng = f"A{DATA_START_ROW}:{last_col_letter}{last_row}"
+        age = f"($C$5-${obs_letter}{DATA_START_ROW})"
+        for lo, hi, _label, fill in AGE_BANDS:
+            cond = f"{age}>={lo}" if hi is None else f"{age}>={lo},{age}<{hi}"
+            ws.conditional_formatting.add(rng, FormulaRule(
+                formula=[f"AND(ISNUMBER(${obs_letter}{DATA_START_ROW}),{cond})"], fill=fill))
+
+    _write_age_legend(ws)
+
+
+def _write_age_legend(ws):
+    """Colour key in E1:F5: a swatch in column E with its meaning in column F.
+
+    Colours come from AGE_BANDS, so the key always matches the highlighting rules.
+    """
+    head = ws["E1"]
+    head.value = "Legend: Days Since Observation Date (as of Date Updated)"
+    head.font = Font(name="Arial", size=10, bold=True)
+    head.alignment = Alignment(horizontal="left", vertical="center")
+    head.border = THIN_BORDER
+    ws.merge_cells("E1:F1")
+
+    rows = [("Less than 30 days (no highlight)", None)]
+    for lo, hi, _label, fill in AGE_BANDS:
+        rows.append((f"{lo} to {hi - 1} days" if hi else f"{lo}+ days", fill))
+
+    for r, (text, fill) in enumerate(rows, start=2):
+        swatch, label = ws[f"E{r}"], ws[f"F{r}"]
+        swatch.border = THIN_BORDER
+        if fill is not None:
+            swatch.fill = fill
+        label.value = text
+        label.font = Font(name="Arial", size=10)
+        label.alignment = Alignment(horizontal="left", vertical="center")
+        label.border = THIN_BORDER
 
 
 def build_workbook(df: pd.DataFrame, profile: Profile, project_name: str = "134 Jane Street") -> bytes:
@@ -225,6 +320,9 @@ def build_workbook(df: pd.DataFrame, profile: Profile, project_name: str = "134 
     ws.conditional_formatting.add(status_range,
         FormulaRule(formula=[f'EXACT(LOWER(TRIM({top})),"closed")'], fill=CLOSED_FILL, stopIfTrue=True))
 
+    if profile.age_highlight:
+        _apply_age_highlight(ws, profile, n, last_row, last_col_letter)
+
     # Logo, exactly 3in wide, top-left corner
     from PIL import Image as PILImage
     w_px, h_px = PILImage.open(LOGO_PATH).size
@@ -240,6 +338,7 @@ def build_workbook(df: pd.DataFrame, profile: Profile, project_name: str = "134 
     for idx, (k, v) in enumerate([
         ("Generated", datetime.now().strftime("%Y-%m-%d %H:%M:%S")),
         ("Inspection type", profile.label),
+        ("Aging reference date", ws["C5"].value.strftime("%Y-%m-%d") if profile.age_highlight else "n/a"),
         ("Template", profile.template),
         ("Rows imported", n),
         ("Project", project_name),
