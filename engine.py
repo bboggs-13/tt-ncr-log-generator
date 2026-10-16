@@ -9,6 +9,7 @@ Add or change a type by editing the PROFILES dict below — no UI changes needed
 """
 from __future__ import annotations
 
+import colorsys
 import io
 from copy import copy
 from dataclasses import dataclass, field
@@ -53,19 +54,20 @@ DATE_FMT = "yyyy-mm-dd"
 CLOSED_WORDS = ("closed", "close")
 
 
-def _tint(hex6: str, strength: float) -> PatternFill:
-    """Muted tint of a brand colour: mix `strength` of the colour with white."""
-    rgb = [int(hex6[i:i + 2], 16) for i in (0, 2, 4)]
-    t = "".join(f"{round(255 - (255 - c) * strength):02X}" for c in rgb)
+def _pastel(hex6: str, saturation: float = 0.65, lightness: float = 0.86) -> PatternFill:
+    """Pastel version of a brand colour: keep its hue, set saturation and lightness."""
+    r, g, b = (int(hex6[i:i + 2], 16) / 255 for i in (0, 2, 4))
+    hue, _l, _s = colorsys.rgb_to_hls(r, g, b)
+    t = "".join(f"{round(c * 255):02X}" for c in colorsys.hls_to_rgb(hue, lightness, saturation))
     return PatternFill(start_color="FF" + t, end_color="FF" + t, fill_type="solid")
 
 
-# Project Closeout NCR Log: rows shaded by NCR type, muted TT primary colours
+# Project Closeout NCR Log: rows shaded by NCR type, pastel TT primary colours
 # (Olive #8B9064, Terracotta #D4451D, Dark Blue #004050).
 TYPE_FILLS = [
-    ("TR-1", "Olive", _tint("8B9064", 0.40)),
-    ("TR-8", "Terracotta", _tint("D4451D", 0.30)),
-    ("QA/QC", "Dark Blue", _tint("004050", 0.25)),
+    ("TR-1", "Olive", _pastel("8B9064")),
+    ("TR-8", "Terracotta", _pastel("D4451D")),
+    ("QA/QC", "Dark Blue", _pastel("004050")),
 ]
 
 # Borders
@@ -159,7 +161,7 @@ PROFILES = {
         center_columns=[1, 2, 3, 4, 7, 9, 10], status_col=7, last_col=10,
         type_highlight=True, status_colors=False,
         legend_cols=("D", "E"),
-        ui_note=("Rows are shaded by NCR Type in muted TT colours: TR-1 olive · TR-8 terracotta · "
+        ui_note=("Rows are shaded by NCR Type in pastel TT colours: TR-1 olive · TR-8 terracotta · "
                  "QA/QC dark blue. Other or blank types are not shaded."),
     ),
     "regular": Profile(
