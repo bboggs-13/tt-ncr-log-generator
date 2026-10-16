@@ -51,6 +51,7 @@ AGE_BANDS = [
     (90, None, "90+ days", PatternFill(start_color="FFF0A8A8", end_color="FFF0A8A8", fill_type="solid")),
 ]
 DATE_FMT = "yyyy-mm-dd"
+TEXT_FIELDS = ("Description", "Recommended Action", "Remarks")  # left + vertically centered
 CLOSED_WORDS = ("closed", "close")
 
 
@@ -377,6 +378,14 @@ def build_workbook(df: pd.DataFrame, profile: Profile, project_name: str = "134 
             cell.alignment = Alignment(horizontal="center", vertical="center",
                                        wrap_text=al.wrap_text, text_rotation=al.text_rotation,
                                        indent=al.indent)
+
+    # Text columns: left aligned, vertically centered, wrapped
+    text_cols = [profile.column_map[f] for f in TEXT_FIELDS if f in profile.column_map]
+    for i in range(n):
+        r = DATA_START_ROW + i
+        for col_letter in text_cols:
+            cell = ws[f"{col_letter}{r}"]
+            cell.alignment = Alignment(horizontal="left", vertical="center", wrap_text=True)
 
     # Borders: thin on all data cells; thick on header row only
     for r in range(DATA_START_ROW, DATA_START_ROW + n):
