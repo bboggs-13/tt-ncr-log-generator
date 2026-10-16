@@ -222,5 +222,19 @@ if uploaded is not None:
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         type="primary",
     )
+
+    # Time Sensitive logs: one-page PDF summary of open items by age band
+    if _profile.age_highlight:
+        import summary_pdf
+        st.subheader("Summary PDF")
+        st.caption("One-page summary of open items in each age category, with the project name "
+                   "and today's date as the date of distribution.")
+        _pdf = summary_pdf.build_summary_pdf(df, _profile, project.strip() or "134 Jane Street")
+        st.download_button(
+            "📄 Generate summary PDF",
+            data=_pdf,
+            file_name=out_name.replace(".xlsx", "_Summary.pdf"),
+            mime="application/pdf",
+        )
 else:
     st.info("Awaiting a CSV upload to begin.")
