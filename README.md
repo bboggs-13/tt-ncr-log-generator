@@ -1,4 +1,4 @@
-[README.md](https://github.com/user-attachments/files/32915291/README.md)
+[README.md](https://github.com/user-attachments/files/33579119/README.md)
 # TT NCR Log Generator
 
 A self-contained web app that converts a PlanRadar Non-Conformance /
@@ -13,9 +13,10 @@ finished workbook.
 - Writes 11 CSV columns into template columns A–K starting at row 8
 - Sets the project name (A4) and today's date (C5)
 - Highlights the Status cell: Open = `#BDD7EE`, Closed = `#C6E0B4`
-- Centers Report #, Item, Observation Date, Type, Priority, Status, Date Closed, Link to ticket
+- Centers Report #, Item, Observation Date, Status, Date Closed, Link to ticket (plus Type on the Project Closeout log)
 - Places one 3-inch TT logo in the top corner
 - Adds an Import Audit sheet
+- Time Sensitive logs: **Generate summary PDF** button at the bottom of the app — a one-page TT-style summary (project, date of distribution, open items in each age category: <30, 30–59, 60–89, 90+ days) using the same rules as the log highlighting
 
 ## Project layout
 
@@ -23,6 +24,7 @@ finished workbook.
 ttfe_ncr_webapp/
 ├── app.py            # Streamlit UI (upload → validate → preview → download)
 ├── engine.py         # reusable import logic + fixed mapping (no UI)
+├── summary_pdf.py    # Time Sensitive one-page summary PDF (reportlab)
 ├── requirements.txt
 ├── assets/
 │   ├── TTFE_Template.xlsx
