@@ -112,7 +112,7 @@ st.markdown(
 
 # --- Header ---
 st.image(str(engine.LOGO_PATH), width=280)
-st.markdown('<div class="tt-eyebrow">Façade Engineering</div>', unsafe_allow_html=True)
+st.markdown('<div class="tt-eyebrow">Façade Engineering · Quality Control</div>', unsafe_allow_html=True)
 st.title("NCR Log Generator")
 st.markdown('<hr class="tt-rule">', unsafe_allow_html=True)
 st.caption(
@@ -146,12 +146,9 @@ if insp_type in engine.LOG_VARIANTS:
         "Log type", options=list(engine.LOG_VARIANTS[insp_type].keys()),
         index=0, label_visibility="collapsed", key=f"log_type_{insp_type}",
     )
-    if engine.get_profile(engine.resolve_profile_key(insp_type, log_variant)).age_highlight:
-        st.caption(
-            "Open items are shaded by days since the Observation Date, measured from the "
-            "log's Date Updated: under 30 none · 30–59 yellow · 60–89 orange · 90+ red. "
-            "Closed items are not shaded."
-        )
+    _note = engine.get_profile(engine.resolve_profile_key(insp_type, log_variant)).ui_note
+    if _note:
+        st.caption(_note)
 profile_key = engine.resolve_profile_key(insp_type, log_variant)
 
 _profile = engine.get_profile(profile_key)
@@ -213,6 +210,7 @@ if uploaded is not None:
     _suffix = {
         "special": "NCR_Log",
         "special_time": "Time_Sensitive_NCR_Log",
+        "special_closeout": "Project_Closeout_NCR_Log",
         "regular": "Site_Inspection_Log",
         "regular_time": "Time_Sensitive_Site_Inspection_Log",
     }.get(profile_key, "Log")
