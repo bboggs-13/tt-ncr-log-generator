@@ -64,9 +64,9 @@ def _pastel(hex6: str, saturation: float = 0.65, lightness: float = 0.86) -> Pat
 
 
 # Project Closeout NCR Log: rows shaded by NCR type, pastel TT primary colours
-# (Olive #8B9064, Terracotta #D4451D, Dark Blue #004050).
+# (TR-1 soft green #CDEBCF; pastel Terracotta #D4451D and Dark Blue #004050).
 TYPE_FILLS = [
-    ("TR-1", "Olive", _pastel("8B9064")),
+    ("TR-1", "Green", PatternFill(start_color="FFCDEBCF", end_color="FFCDEBCF", fill_type="solid")),  # soft green (not TT olive)
     ("TR-8", "Terracotta", _pastel("D4451D")),
     ("QA/QC", "Dark Blue", _pastel("004050")),
 ]
@@ -162,7 +162,7 @@ PROFILES = {
         center_columns=[1, 2, 3, 4, 7, 9, 10], status_col=7, last_col=10,
         type_highlight=True, status_colors=False,
         legend_cols=("D", "E"),
-        ui_note=("Rows are shaded by NCR Type in pastel TT colours: TR-1 olive · TR-8 terracotta · "
+        ui_note=("Rows are shaded by NCR Type in pastel colours: TR-1 green · TR-8 terracotta · "
                  "QA/QC dark blue. Other or blank types are not shaded."),
     ),
     "regular": Profile(
