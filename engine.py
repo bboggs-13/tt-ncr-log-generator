@@ -50,6 +50,23 @@ AGE_BANDS = [
     (90, None, "90+ days", PatternFill(start_color="FFF0A8A8", end_color="FFF0A8A8", fill_type="solid")),
 ]
 DATE_FMT = "yyyy-mm-dd"
+CLOSED_WORDS = ("closed", "close")
+
+
+def _tint(hex6: str, strength: float) -> PatternFill:
+    """Muted tint of a brand colour: mix `strength` of the colour with white."""
+    rgb = [int(hex6[i:i + 2], 16) for i in (0, 2, 4)]
+    t = "".join(f"{round(255 - (255 - c) * strength):02X}" for c in rgb)
+    return PatternFill(start_color="FF" + t, end_color="FF" + t, fill_type="solid")
+
+
+# Project Closeout NCR Log: rows shaded by NCR type, muted TT primary colours
+# (Olive #8B9064, Terracotta #D4451D, Dark Blue #004050).
+TYPE_FILLS = [
+    ("TR-1", "Olive", _tint("8B9064", 0.40)),
+    ("TR-8", "Terracotta", _tint("D4451D", 0.30)),
+    ("QA/QC", "Dark Blue", _tint("004050", 0.25)),
+]
 
 # Borders
 _THIN = Side(style="thin", color="FF000000")
@@ -64,6 +81,7 @@ EMU_PER_IN = 914400
 ALIASES = {
     "Report #": ["Report", "Report No", "Report No.", "Report Number", "Report#"],
     "Non-Conformance #": ["Item #", "Item", "Observation #", "Inspection #", "Issue #"],
+    "Type": ["NCR Type", "Type of NCR", "Category"],
     "Responsible Party": ["Responsible", "Party Responsible", "Responsible party",
                           "Trade", "Contractor", "Assigned to"],
 }
@@ -79,8 +97,35 @@ class Profile:
     center_columns: list          # 1-based column indices to center
     status_col: int               # 1-based index of the Status column
     last_col: int                 # 1-based index of the last column
-    age_highlight: bool = False   # Time Sensitive: shade rows by age of Observation Date
-    legend_cols: tuple = ("E", "F")  # Time Sensitive legend: (swatch column, label column)
+    age_highlight: bool = False   # Time Sensitive: shade open rows by age of Observation Date
+    type_highlight: bool = False  # Project Closeout: shade rows by NCR Type
+    status_colors: bool = True    # blue/yellow/green Status-cell colours (off when rows are shaded)
+    filter_open: bool = False     # open the log pre-filtered to non-Closed items
+    legend_cols: tuple = ("E", "F")  # legend: (swatch column, label column)
+    ui_note: str = ""             # short explanation shown in the app
+
+
+_AGE_NOTE = ("Open items are shaded across the whole row by days since the Observation Date, "
+             "measured from the log's Date Updated: under 30 none · 30–59 yellow · 60–89 orange · "
+             "90+ red. Closed items are not shaded. The log opens filtered to open items — use the "
+             "Status filter to show closed items.")
+
+# Special Inspections columns (Type and Priority removed)
+_SPECIAL_MAP = {
+    "Report #": "A", "Non-Conformance #": "B", "Observation Date": "C",
+    "Description": "D", "Recommended Action": "E", "Status": "F",
+    "Remarks": "G", "Date Closed": "H", "Link to ticket": "I",
+}
+_SPECIAL_REQ = ["Report #", "Non-Conformance #", "Observation Date", "Status"]
+_SPECIAL_CENTER = [1, 2, 3, 6, 8, 9]
+
+_REGULAR_MAP = {
+    "Report #": "A", "Non-Conformance #": "B", "Observation Date": "C",
+    "Responsible Party": "D", "Description": "E", "Recommended Action": "F",
+    "Status": "G", "Remarks": "H", "Date Closed": "I",
+}
+_REGULAR_REQ = ["Observation Date", "Status"]
+_REGULAR_CENTER = [1, 2, 3, 4, 7, 9]
 
 
 PROFILES = {
@@ -88,60 +133,51 @@ PROFILES = {
         key="special",
         label="Special Inspections",
         template="TTFE_Template.xlsx",
-        column_map={
-            "Report #": "A", "Non-Conformance #": "B", "Observation Date": "C",
-            "Type": "D", "Priority": "E", "Description": "F", "Recommended Action": "G",
-            "Status": "H", "Remarks": "I", "Date Closed": "J", "Link to ticket": "K",
-        },
-        required_columns=["Report #", "Non-Conformance #", "Observation Date", "Type", "Status"],
-        center_columns=[1, 2, 3, 4, 5, 8, 10, 11],
-        status_col=8,
-        last_col=11,
+        column_map=_SPECIAL_MAP, required_columns=_SPECIAL_REQ,
+        center_columns=_SPECIAL_CENTER, status_col=6, last_col=9,
     ),
     "special_time": Profile(
         key="special_time",
         label="Special Inspections — Time Sensitive NCR Log",
         template="TTFE_Template_TimeSensitive.xlsx",
+        column_map=_SPECIAL_MAP, required_columns=_SPECIAL_REQ,
+        center_columns=_SPECIAL_CENTER, status_col=6, last_col=9,
+        age_highlight=True, status_colors=False, filter_open=True,
+        legend_cols=("F", "G"),  # narrow Status column holds the swatches
+        ui_note=_AGE_NOTE,
+    ),
+    "special_closeout": Profile(
+        key="special_closeout",
+        label="Special Inspections — Project Closeout NCR Log",
+        template="TTFE_Template_Closeout.xlsx",
         column_map={
             "Report #": "A", "Non-Conformance #": "B", "Observation Date": "C",
-            "Type": "D", "Priority": "E", "Description": "F", "Recommended Action": "G",
-            "Status": "H", "Remarks": "I", "Date Closed": "J", "Link to ticket": "K",
+            "Type": "D", "Description": "E", "Recommended Action": "F",
+            "Status": "G", "Remarks": "H", "Date Closed": "I", "Link to ticket": "J",
         },
         required_columns=["Report #", "Non-Conformance #", "Observation Date", "Type", "Status"],
-        center_columns=[1, 2, 3, 4, 5, 8, 10, 11],
-        status_col=8,
-        last_col=11,
-        age_highlight=True,
+        center_columns=[1, 2, 3, 4, 7, 9, 10], status_col=7, last_col=10,
+        type_highlight=True, status_colors=False,
+        legend_cols=("D", "E"),
+        ui_note=("Rows are shaded by NCR Type in muted TT colours: TR-1 olive · TR-8 terracotta · "
+                 "QA/QC dark blue. Other or blank types are not shaded."),
     ),
     "regular": Profile(
         key="regular",
         label="Regular Site Inspections",
         template="TTFE_Template_Regular.xlsx",
-        column_map={
-            "Report #": "A", "Non-Conformance #": "B", "Observation Date": "C",
-            "Responsible Party": "D", "Description": "E", "Recommended Action": "F",
-            "Status": "G", "Remarks": "H", "Date Closed": "I",
-        },
-        required_columns=["Observation Date", "Status"],
-        center_columns=[1, 2, 3, 4, 7, 9],
-        status_col=7,
-        last_col=9,
+        column_map=_REGULAR_MAP, required_columns=_REGULAR_REQ,
+        center_columns=_REGULAR_CENTER, status_col=7, last_col=9,
     ),
     "regular_time": Profile(
         key="regular_time",
         label="Regular Site Inspections — Time Sensitive Site Inspection Log",
         template="TTFE_Template_Regular_TimeSensitive.xlsx",
-        column_map={
-            "Report #": "A", "Non-Conformance #": "B", "Observation Date": "C",
-            "Responsible Party": "D", "Description": "E", "Recommended Action": "F",
-            "Status": "G", "Remarks": "H", "Date Closed": "I",
-        },
-        required_columns=["Observation Date", "Status"],
-        center_columns=[1, 2, 3, 4, 7, 9],
-        status_col=7,
-        last_col=9,
-        age_highlight=True,
+        column_map=_REGULAR_MAP, required_columns=_REGULAR_REQ,
+        center_columns=_REGULAR_CENTER, status_col=7, last_col=9,
+        age_highlight=True, status_colors=False, filter_open=True,
         legend_cols=("D", "E"),  # narrow Responsible Party column holds the swatches
+        ui_note=_AGE_NOTE,
     ),
 }
 DEFAULT_PROFILE = "special"
@@ -149,7 +185,8 @@ DEFAULT_PROFILE = "special"
 # What the UI shows: inspection types, and (optionally) log variants within a type.
 INSPECTION_TYPES = {"special": "Special Inspections", "regular": "Regular Site Inspections"}
 LOG_VARIANTS = {
-    "special": {"Standard NCR Log": "special", "Time Sensitive NCR Log": "special_time"},
+    "special": {"Standard NCR Log": "special", "Time Sensitive NCR Log": "special_time",
+                "Project Closeout NCR Log": "special_closeout"},
     "regular": {"Standard Site Inspection Log": "regular",
                 "Time Sensitive Site Inspection Log": "regular_time"},
 }
@@ -233,32 +270,68 @@ def _apply_age_highlight(ws, profile, n, last_row, last_col_letter):
         age = f"($C$5-${obs_letter}{DATA_START_ROW})"
         # Only items that are still open get aged; Closed items are never shaded.
         st_cell = f"LOWER(TRIM(${get_column_letter(profile.status_col)}{DATA_START_ROW}))"
-        not_closed = f'{st_cell}<>"closed",{st_cell}<>"close"'
+        not_closed = ",".join(f'{st_cell}<>"{w}"' for w in CLOSED_WORDS)
         for lo, hi, _label, fill in AGE_BANDS:
             cond = f"{age}>={lo}" if hi is None else f"{age}>={lo},{age}<{hi}"
             ws.conditional_formatting.add(rng, FormulaRule(
                 formula=[f"AND(ISNUMBER(${obs_letter}{DATA_START_ROW}),{not_closed},{cond})"], fill=fill))
 
-    _write_age_legend(ws, profile)
+    rows = [("Less than 30 days (no highlight)", None)] + [
+        (f"{lo} to {hi - 1} days" if hi else f"{lo}+ days", fill) for lo, hi, _l, fill in AGE_BANDS
+    ]
+    _write_legend(ws, profile,
+                  "Legend: Days Since Observation Date, Open Items Only (as of Date Updated)", rows)
 
 
-def _write_age_legend(ws, profile):
+def _apply_type_highlight(ws, profile, n, last_row, last_col_letter):
+    """Shade whole data rows by NCR Type (TR-1 / TR-8 / QA/QC)."""
+    t = profile.column_map["Type"]
+    if n > 0:
+        rng = f"A{DATA_START_ROW}:{last_col_letter}{last_row}"
+        for value, _name, fill in TYPE_FILLS:
+            ws.conditional_formatting.add(rng, FormulaRule(
+                formula=[f'EXACT(UPPER(TRIM(${t}{DATA_START_ROW})),"{value}")'], fill=fill, stopIfTrue=True))
+    rows = [(v, fill) for v, _name, fill in TYPE_FILLS] + [("Other / blank type (no highlight)", None)]
+    _write_legend(ws, profile, "Legend: NCR Type", rows)
+
+
+def _apply_open_filter(ws, profile, n, last_row):
+    """Pre-apply the Status filter so only non-Closed items show on open.
+
+    Closed rows are hidden by the filter (not deleted) — choosing 'Select All' in the
+    Status dropdown brings them back. Skipped if nothing is closed or everything is.
+    """
+    letter = get_column_letter(profile.status_col)
+    shown, hidden = [], []
+    for r in range(DATA_START_ROW, last_row + 1):
+        v = ws[f"{letter}{r}"].value
+        text = "" if v is None else str(v)
+        if text.strip().lower() in CLOSED_WORDS:
+            hidden.append(r)
+        elif text not in shown:
+            shown.append(text)
+    if not hidden or len(hidden) == n:
+        return 0
+    ws.auto_filter.add_filter_column(profile.status_col - 1, [t for t in shown if t],
+                                     blank="" in shown)
+    for r in hidden:
+        ws.row_dimensions[r].hidden = True
+    return len(hidden)
+
+
+def _write_legend(ws, profile, title, rows):
     """Colour key in rows 1-5: swatch in one column, meaning in the next.
 
-    Special uses E1:F5, Regular uses D1:E5 (see Profile.legend_cols). Colours come
-    from AGE_BANDS, so the key always matches the highlighting rules.
+    Column pair comes from Profile.legend_cols; fills come from the same constants
+    as the highlighting rules, so the key always matches the rows.
     """
     sw_col, lab_col = profile.legend_cols
     head = ws[f"{sw_col}1"]
-    head.value = "Legend: Days Since Observation Date, Open Items Only (as of Date Updated)"
+    head.value = title
     head.font = Font(name="Arial", size=10, bold=True)
     head.alignment = Alignment(horizontal="left", vertical="center")
     head.border = THIN_BORDER
     ws.merge_cells(f"{sw_col}1:{lab_col}1")
-
-    rows = [("Less than 30 days (no highlight)", None)]
-    for lo, hi, _label, fill in AGE_BANDS:
-        rows.append((f"{lo} to {hi - 1} days" if hi else f"{lo}+ days", fill))
 
     for r, (text, fill) in enumerate(rows, start=2):
         swatch, label = ws[f"{sw_col}{r}"], ws[f"{lab_col}{r}"]
@@ -333,18 +406,23 @@ def build_workbook(df: pd.DataFrame, profile: Profile, project_name: str = "134 
     ws.add_data_validation(dv)
     dv.add(f"{status_letter}{DATA_START_ROW}:{status_letter}{last_row}")
 
-    # Live highlighting via conditional formatting (recolors on dropdown change)
-    status_range = f"{status_letter}{DATA_START_ROW}:{status_letter}{last_row}"
-    top = f"{status_letter}{DATA_START_ROW}"
-    ws.conditional_formatting.add(status_range,
-        FormulaRule(formula=[f'EXACT(LOWER(TRIM({top})),"open")'], fill=OPEN_FILL, stopIfTrue=True))
-    ws.conditional_formatting.add(status_range,
-        FormulaRule(formula=[f'EXACT(LOWER(TRIM({top})),"in progress")'], fill=INPROGRESS_FILL, stopIfTrue=True))
-    ws.conditional_formatting.add(status_range,
-        FormulaRule(formula=[f'EXACT(LOWER(TRIM({top})),"closed")'], fill=CLOSED_FILL, stopIfTrue=True))
+    # Live Status-cell highlighting (recolors on dropdown change). Turned off for logs
+    # whose rows are shaded by another rule, so that colour runs across the whole row.
+    if profile.status_colors:
+        status_range = f"{status_letter}{DATA_START_ROW}:{status_letter}{last_row}"
+        top = f"{status_letter}{DATA_START_ROW}"
+        ws.conditional_formatting.add(status_range,
+            FormulaRule(formula=[f'EXACT(LOWER(TRIM({top})),"open")'], fill=OPEN_FILL, stopIfTrue=True))
+        ws.conditional_formatting.add(status_range,
+            FormulaRule(formula=[f'EXACT(LOWER(TRIM({top})),"in progress")'], fill=INPROGRESS_FILL, stopIfTrue=True))
+        ws.conditional_formatting.add(status_range,
+            FormulaRule(formula=[f'EXACT(LOWER(TRIM({top})),"closed")'], fill=CLOSED_FILL, stopIfTrue=True))
 
     if profile.age_highlight:
         _apply_age_highlight(ws, profile, n, last_row, last_col_letter)
+    if profile.type_highlight:
+        _apply_type_highlight(ws, profile, n, last_row, last_col_letter)
+    hidden_closed = _apply_open_filter(ws, profile, n, last_row) if profile.filter_open and n else 0
 
     # Logo, exactly 3in wide, top-left corner
     from PIL import Image as PILImage
@@ -363,6 +441,7 @@ def build_workbook(df: pd.DataFrame, profile: Profile, project_name: str = "134 
         ("Inspection type", profile.label),
         ("Aging reference date", ws["C5"].value.strftime("%Y-%m-%d") if profile.age_highlight else "n/a"),
         ("Template", profile.template),
+        ("Default filter", f"Open items only ({hidden_closed} closed hidden)" if hidden_closed else "None"),
         ("Rows imported", n),
         ("Project", project_name),
     ], start=1):
