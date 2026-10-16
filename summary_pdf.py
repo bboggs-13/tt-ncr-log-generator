@@ -25,6 +25,7 @@ TT_OLIVE = HexColor("#839058")
 TT_TERRA = HexColor("#D53822")
 LIGHT_RULE = HexColor("#C9C9CC")
 MUTED = HexColor("#6E6E76")
+CLOSED_WINDOWS = (30, 60, 90)                # "closed in the last N days" (cumulative)
 FONT, FONT_LIGHT, FONT_BOLD = "Helvetica", "Helvetica", "Helvetica-Bold"  # Univers stand-in
 
 
@@ -62,13 +63,21 @@ def age_summary(df: pd.DataFrame, ref_date: date | None = None) -> dict:
         if c["hi"] is not None:
             m &= dated < c["hi"]
         c["count"] = int(m.sum())
+    # Recently closed: Status = Closed with a valid Date Closed, within N days of distribution
+    dc_col = engine._resolve_field("Date Closed", df)
+    closed_dt = pd.to_datetime(df[dc_col], errors="coerce") if dc_col else pd.Series(pd.NaT, index=df.index)
+    closed_ages = (pd.Timestamp(ref) - closed_dt).dt.days[~is_open]
+    recent = {w: int(((closed_ages >= 0) & (closed_ages <= w)).sum()) for w in CLOSED_WINDOWS}
+    closed_undated = int(closed_ages.isna().sum())
+
     oldest = None
     if len(dated):
         i = dated.idxmax()
         oldest = {"days": int(dated[i]), "date": obs[i].date()}
     return {"ref_date": ref, "categories": cats, "open_total": int(is_open.sum()),
             "closed": int((~is_open).sum()), "undated": int(open_ages.isna().sum()),
-            "total": len(df), "oldest": oldest}
+            "total": len(df), "oldest": oldest,
+            "closed_recent": recent, "closed_undated": closed_undated}
 
 
 # ---------------------------------------------------------------- drawing helpers
@@ -190,14 +199,43 @@ def build_summary_pdf(df: pd.DataFrame, profile, project_name: str,
     else:
         c.rect(MARGIN, _y(bar_top + bar_h), CONTENT_W, bar_h, stroke=1, fill=0)
 
+    # Recently closed line (cumulative windows)
+    _section(c, 452, "Recently closed items")
+    line_top = 478
+    c.setFillColor(TT_GRAY)
+    c.setFont(FONT, 10.5)
+    c.drawString(MARGIN, _y(line_top), "Closed in the last")
+    x = MARGIN + 104
+    for w in CLOSED_WINDOWS:
+        c.setFont(FONT_BOLD, 16)
+        c.setFillColor(TT_GRAY)
+        num = str(s["closed_recent"][w])
+        c.drawString(x, _y(line_top + 1), num)
+        nx = x + c.stringWidth(num, FONT_BOLD, 16) + 6
+        c.setFont(FONT, 10.5)
+        c.setFillColor(MUTED)
+        c.drawString(nx, _y(line_top), f"{w} days")
+        x = nx + c.stringWidth(f"{w} days", FONT, 10.5) + 26
+        if w != CLOSED_WINDOWS[-1]:
+            c.setStrokeColor(LIGHT_RULE)
+            c.setLineWidth(0.75)
+            c.line(x - 13, _y(line_top + 4), x - 13, _y(line_top - 12))
+    c.setFont(FONT, 8)
+    c.setFillColor(MUTED)
+    sub = "Counts are cumulative (the 60-day figure includes the last 30 days), based on Date Closed."
+    if s["closed_undated"]:
+        sub += f" {s['closed_undated']} closed item(s) have no Date Closed and are not counted."
+    for i, line in enumerate(_wrap(c, sub, FONT, 8, CONTENT_W)):
+        c.drawString(MARGIN, _y(line_top + 18 + i * 11), line)
+
     # Notes
-    y = 452
+    y = 536
     _section(c, y, "Notes")
     notes = [
         f"Ages are counted from each item's Observation Date to the date of distribution "
         f"({_fmt_date(s['ref_date'])}), the same rule used to highlight the Time Sensitive {log_name}.",
         "Open items include anything not marked Closed (Open and In Progress).",
-        f"Closed items are excluded from the counts: {s['closed']} of {s['total']} items in this export.",
+        f"Closed items are excluded from the age counts: {s['closed']} of {s['total']} items in this export.",
     ]
     if s["oldest"]:
         notes.append(f"Oldest open item: {s['oldest']['days']} days, observed {_fmt_date(s['oldest']['date'])}.")
