@@ -30,7 +30,17 @@ ASSETS = Path(__file__).parent / "assets"
 LOGO_PATH = ASSETS / "tt_logo.png"
 
 # --- Shared layout (same for every template) ---
-SHEET = "Sheet1"
+SHEET = "Sheet1"                     # legacy name (templates are now titled per log type)
+SHEET_TITLES = {                     # Excel tab names (31-char limit)
+    "special": "NCR Log",
+    "special_time": "Time Sensitive NCR Log",
+    "special_closeout": "Project Closeout NCR Log",
+    "regular": "Site Inspection Log",
+    "regular_time": "Time Sensitive Site Insp. Log",
+}
+SUMMARY_SHEET = "Summary"
+AUDIT_SHEET = "Import Audit"
+FREEZE_CELL = "A8"                   # rows 1-7 (logo, project, date, legend, column titles) stay visible
 HEADER_ROW = 7
 DATA_START_ROW = 8
 TITLE_ROW = 4
@@ -51,6 +61,8 @@ AGE_BANDS = [
     (90, None, "90+ days", PatternFill(start_color="FFF0A8A8", end_color="FFF0A8A8", fill_type="solid")),
 ]
 DATE_FMT = "yyyy-mm-dd"
+CLOSED_WINDOWS = (30, 60, 90)                       # "closed in the last N days" (cumulative)
+CLOSED_COLOURS = ("#C6E0B4", "#D5E8C8", "#E2EFDA")  # log Closed green, lighter for longer windows
 TEXT_FIELDS = ("Description", "Recommended Action", "Remarks")  # left + vertically centered
 CLOSED_WORDS = ("closed", "close")
 
@@ -268,6 +280,15 @@ def _apply_age_highlight(ws, profile, n, last_row, last_col_letter):
             cell.value = parsed.date()
             cell.number_format = DATE_FMT
 
+    dc_letter = profile.column_map.get("Date Closed")
+    if dc_letter:
+        for r in range(DATA_START_ROW, DATA_START_ROW + n):
+            cell = ws[f"{dc_letter}{r}"]
+            parsed = pd.to_datetime(cell.value, errors="coerce") if cell.value not in (None, "") else pd.NaT
+            if not pd.isna(parsed):
+                cell.value = parsed.date()
+                cell.number_format = DATE_FMT
+
     if n > 0:
         rng = f"A{DATA_START_ROW}:{last_col_letter}{last_row}"
         age = f"($C$5-${obs_letter}{DATA_START_ROW})"
@@ -347,9 +368,175 @@ def _write_legend(ws, profile, title, rows):
         label.border = THIN_BORDER
 
 
+# ---------------------------------------------------------------- summary sheet
+_S_GRAY, _S_OLIVE, _S_MUTED, _S_RULE = "FF42424A", "FF839058", "FF6E6E76", "FFC9C9CC"
+_CARD_COLS = ("A", "C", "E", "G")    # four cards; B, D, F are narrow gutters
+
+
+def _sfont(size=10, bold=False, color=_S_GRAY):
+    return Font(name="Arial", size=size, bold=bold, color=color)
+
+
+def _section_row(sm, r, title):
+    sm[f"A{r}"] = title.upper()
+    sm[f"A{r}"].font = _sfont(9, True)
+    rule = Side(style="thin", color=_S_GRAY)
+    for col in "ABCDEFG":
+        sm[f"{col}{r}"].border = Border(bottom=rule)
+    sm.row_dimensions[r].height = 18
+
+
+def _card_row(sm, top, cards):
+    """Five-row card: colour band, big count, label, two detail lines (all centred)."""
+    edge = Side(style="thin", color=_S_RULE)
+    sm.row_dimensions[top].height = 8
+    sm.row_dimensions[top + 1].height = 40
+    for col, card in zip(_CARD_COLS, cards):
+        for i in range(5):
+            cell = sm[f"{col}{top + i}"]
+            cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+            cell.border = Border(left=edge, right=edge,
+                                 top=edge if i in (0, 1) else None, bottom=edge if i == 4 else None)
+        if card["colour"]:
+            hexc = "FF" + card["colour"].lstrip("#")
+            sm[f"{col}{top}"].fill = PatternFill(start_color=hexc, end_color=hexc, fill_type="solid")
+        sm[f"{col}{top + 1}"] = card["count"]
+        sm[f"{col}{top + 1}"].font = _sfont(26, True)
+        sm[f"{col}{top + 2}"] = card["label"]
+        sm[f"{col}{top + 2}"].font = _sfont(10, True)
+        sm[f"{col}{top + 3}"] = card["line1"]
+        sm[f"{col}{top + 3}"].font = _sfont(8, color=_S_MUTED)
+        sm[f"{col}{top + 4}"] = card["line2"]
+        sm[f"{col}{top + 4}"].font = _sfont(8, color=_S_MUTED)
+
+
+def _add_summary_sheet(wb, ws, profile, n, project_name):
+    """Summary of the Time Sensitive log, matching the summary PDF.
+
+    Every figure is a formula on the log sheet (same rules as the row highlighting), so
+    editing a Status or the Date Updated cell updates the summary as well.
+    """
+    sm = wb.create_sheet(SUMMARY_SHEET, 0)
+    q = "'" + ws.title.replace("'", "''") + "'!"
+    last = max(DATA_START_ROW + n - 1, DATA_START_ROW)
+    rng = lambda letter: f"{q}${letter}${DATA_START_ROW}:${letter}${last}"
+    S = rng(get_column_letter(profile.status_col))
+    O = rng(profile.column_map["Observation Date"])
+    D = rng(profile.column_map["Date Closed"])
+    R = f"{q}$C$5"
+    not_closed = f'{S},"<>Closed",{S},"<>Close"'
+    log_name = "NCR Log" if profile.key.startswith("special") else "Site Inspection Log"
+    kind = "Special Inspections" if profile.key.startswith("special") else "Regular Site Inspections"
+
+    sm.sheet_view.showGridLines = False
+    for col in _CARD_COLS:
+        sm.column_dimensions[col].width = 24
+    for col in "BDF":
+        sm.column_dimensions[col].width = 2.5
+
+    # Logo, same size and position as the log
+    from PIL import Image as PILImage
+    w_px, h_px = PILImage.open(LOGO_PATH).size
+    width_emu = int(EMU_PER_IN * LOGO_WIDTH_IN)
+    img = XLImage(str(LOGO_PATH))
+    img.anchor = OneCellAnchor(_from=AnchorMarker(col=0, colOff=0, row=0, rowOff=0),
+                               ext=XDRPositiveSize2D(width_emu, int(width_emu * h_px / w_px)))
+    sm.add_image(img)
+
+    sm["A4"] = "Time Sensitive NCR Summary"
+    sm["A4"].font = _sfont(18, True)
+    sm.row_dimensions[4].height = 26
+    sm["A5"] = f"{kind}  ·  Open items by days since observation"
+    sm["A5"].font = _sfont(11, color=_S_OLIVE)
+
+    # Project / distribution details
+    for col, label in zip(_CARD_COLS, ("Project", "Date of distribution", "Open items", "Closed items")):
+        sm[f"{col}7"] = label.upper()
+        sm[f"{col}7"].font = _sfont(7.5, True, _S_MUTED)
+    sm["A8"] = project_name
+    sm["C8"] = f"={R}"
+    sm["C8"].number_format = "mmmm d, yyyy"
+    sm["G8"] = f'=COUNTIF({S},"Closed")+COUNTIF({S},"Close")'
+    sm["E8"] = f"={n}-G8"
+    rule = Side(style="thin", color=_S_RULE)
+    for col in "ABCDEFG":
+        cell = sm[f"{col}8"]
+        cell.font = _sfont(12)
+        cell.alignment = Alignment(horizontal="left", vertical="center")
+        cell.border = Border(bottom=rule)
+    sm.row_dimensions[8].height = 22
+
+    # Open items by age (same bands as the log highlighting)
+    _section_row(sm, 10, "Open items by age")
+    bounds = [("", f'">"&({R}-30)')] + [
+        (f'"<="&({R}-{lo})', f'">"&({R}-{hi})' if hi else "") for lo, hi, _l, _f in AGE_BANDS]
+    labels = ["Less than 30 days"] + [f"{lo}–{hi - 1} days" if hi else f"{lo}+ days" for lo, hi, _l, _f in AGE_BANDS]
+    colours = [None] + ["#" + f.fgColor.rgb[-6:] for _lo, _hi, _l, f in AGE_BANDS]
+    swatches = ["No highlight", "Yellow in log", "Orange in log", "Red in log"]
+    cards = []
+    for col, (upper, lower), label, colour, sw in zip(_CARD_COLS, bounds, labels, colours, swatches):
+        crit = "".join(f",{O},{c}" for c in (upper, lower) if c)
+        cards.append({"count": f"=COUNTIFS({not_closed}{crit})", "label": label, "colour": colour,
+                      "line1": f'=IF($E$8=0,"—",TEXT({col}13/$E$8,"0%")&" of open items")', "line2": sw})
+    _card_row(sm, 12, cards)
+
+    # Recently closed items (cumulative windows) + closed without a date
+    _section_row(sm, 18, "Recently closed items")
+    cards = []
+    for col, w, colour in zip(_CARD_COLS, CLOSED_WINDOWS, CLOSED_COLOURS):
+        win = f'{D},">="&({R}-{w}),{D},"<="&{R}'
+        cards.append({
+            "count": f'=COUNTIFS({S},"Closed",{win})+COUNTIFS({S},"Close",{win})',
+            "label": f"Last {w} days", "colour": colour,
+            "line1": f'=IF($G$8=0,"—",TEXT({col}21/$G$8,"0%")&" of closed items")',
+            "line2": f'="Closed since "&TEXT({R}-{w},"mmm d, yyyy")',
+        })
+    cards.append({
+        "count": f'=G8-(COUNTIFS({S},"Closed",{D},">0")+COUNTIFS({S},"Close",{D},">0"))',
+        "label": "No Date Closed", "colour": None,
+        "line1": '=IF($G$8=0,"—",TEXT(G21/$G$8,"0%")&" of closed items")',
+        "line2": "Not counted in windows",
+    })
+    _card_row(sm, 20, cards)
+    sm["A25"] = ("Counts are cumulative (the 60-day figure includes the last 30 days) "
+                 "and use each closed item's Date Closed.")
+    sm["A25"].font = _sfont(8, color=_S_MUTED)
+
+    # Notes (live)
+    _section_row(sm, 27, "Notes")
+    oldest = f'_xlfn.MINIFS({O},{not_closed})'
+    notes = [
+        f'="•  Ages are counted from each item’s Observation Date to the date of distribution ("'
+        f'&TEXT({R},"mmmm d, yyyy")&"), the same rule used to highlight the Time Sensitive {log_name}."',
+        "•  Open items include anything not marked Closed (Open and In Progress).",
+        f'="•  Closed items are excluded from the age counts: "&G8&" of {n} items in this log."',
+        f'=IF(OR($E$8=0,{oldest}=0),"","•  Oldest open item: "&({R}-{oldest})&" days, observed "&TEXT({oldest},"mmmm d, yyyy")&".")',
+        f'=IF($E$8-SUM(A13,C13,E13,G13)>0,"•  "&($E$8-SUM(A13,C13,E13,G13))&" open item(s) have no valid Observation Date and cannot be aged.","")',
+    ]
+    for i, text in enumerate(notes):
+        r = 29 + i
+        sm.merge_cells(f"A{r}:G{r}")
+        sm[f"A{r}"] = text
+        sm[f"A{r}"].font = _sfont(9.5)
+        sm[f"A{r}"].alignment = Alignment(horizontal="left", vertical="top", wrap_text=True)
+        sm.row_dimensions[r].height = 26 if i == 0 else 15
+
+    # Print: one page, portrait
+    sm.page_setup.orientation = "portrait"
+    sm.page_setup.fitToWidth = 1
+    sm.page_setup.fitToHeight = 1
+    sm.sheet_properties.pageSetUpPr.fitToPage = True
+    sm.print_area = "A1:G34"
+
+    # Open on the summary (and don't leave the log tab grouped with it)
+    ws.sheet_view.tabSelected = False
+    wb.active = 0
+
+
 def build_workbook(df: pd.DataFrame, profile: Profile, project_name: str = "134 Jane Street") -> bytes:
     wb = load_workbook(ASSETS / profile.template)
-    ws = wb[SHEET]
+    ws = wb.worksheets[0]
+    ws.title = SHEET_TITLES.get(profile.key, "Log")
     ws._images = []  # we place exactly one logo
 
     first_col, last_col = 1, profile.last_col
@@ -445,8 +632,15 @@ def build_workbook(df: pd.DataFrame, profile: Profile, project_name: str = "134 
                                ext=XDRPositiveSize2D(width_emu, height_emu))
     ws.add_image(img)
 
+    # Keep the title block and column headers visible while scrolling
+    ws.freeze_panes = FREEZE_CELL
+
+    # Time Sensitive logs: live summary sheet first, log second
+    if profile.age_highlight:
+        _add_summary_sheet(wb, ws, profile, n, project_name)
+
     # Audit sheet
-    audit = wb.create_sheet("Import Audit")
+    audit = wb.create_sheet(AUDIT_SHEET)
     for idx, (k, v) in enumerate([
         ("Generated", datetime.now().strftime("%Y-%m-%d %H:%M:%S")),
         ("Inspection type", profile.label),
