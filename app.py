@@ -138,14 +138,21 @@ except AttributeError:
         horizontal=True, label_visibility="collapsed",
     )
 
-# Log type dropdown (Standard vs Time Sensitive) for each inspection type
+# Log type buttons (same style as Inspection type) for each inspection type
 log_variant = None
 if insp_type in engine.LOG_VARIANTS:
     field_label(_MAGNIFIER_B64, "Log type")
-    log_variant = st.selectbox(
-        "Log type", options=list(engine.LOG_VARIANTS[insp_type].keys()),
-        index=0, label_visibility="collapsed", key=f"log_type_{insp_type}",
-    )
+    _variants = list(engine.LOG_VARIANTS[insp_type].keys())
+    try:
+        log_variant = st.segmented_control(
+            "Log type", options=_variants, default=_variants[0],
+            label_visibility="collapsed", key=f"log_type_{insp_type}",
+        ) or _variants[0]          # clicking the active button again keeps a selection
+    except AttributeError:         # older Streamlit without segmented_control
+        log_variant = st.radio(
+            "Log type", options=_variants, horizontal=True,
+            label_visibility="collapsed", key=f"log_type_{insp_type}",
+        )
     _note = engine.get_profile(engine.resolve_profile_key(insp_type, log_variant)).ui_note
     if _note:
         st.caption(_note)
