@@ -108,25 +108,46 @@ st.markdown(
       }
       .tt-field-label img { height: 20px; width: 20px; object-fit: contain; }
 
-      /* Hover-only explanations on field labels */
+      /* Hover-only explanations on field labels: frosted cream card, olive accent */
       .tt-has-tip { position: relative; cursor: help; width: fit-content; outline: none; }
       .tt-tip-icon {
         display: inline-flex; align-items: center; justify-content: center;
-        width: 15px; height: 15px; border-radius: 50%;
-        border: 1.5px solid var(--tt-gray); color: var(--tt-gray);
+        width: 16px; height: 16px; border-radius: 50%;
+        background: rgba(139, 144, 100, 0.14); color: var(--tt-olive);
         font-size: 10px; font-weight: 700; font-style: italic; font-family: Georgia, serif;
+        transition: background 0.15s ease, color 0.15s ease;
+      }
+      .tt-has-tip:hover .tt-tip-icon, .tt-has-tip:focus .tt-tip-icon {
+        background: var(--tt-olive); color: #FFFFFF;
       }
       .tt-tip-text {
-        visibility: hidden; opacity: 0; transition: opacity 0.12s ease-in;
-        position: absolute; left: 0; top: calc(100% + 6px); z-index: 1000;
-        width: max-content; max-width: min(460px, 85vw);
-        background: var(--tt-ink); color: #FFFFFF;
-        font-size: 0.8rem; font-weight: 400; line-height: 1.4;
-        padding: 8px 11px; border-radius: 6px;
-        box-shadow: 0 4px 14px rgba(0, 0, 0, 0.18);
+        visibility: hidden; opacity: 0; transform: translateY(-4px);
+        transition: opacity 0.16s ease, transform 0.16s ease, visibility 0.16s;
+        position: absolute; left: -6px; top: calc(100% + 10px); z-index: 1000;
+        width: max-content; max-width: min(420px, 85vw);
+        background: rgba(250, 249, 245, 0.88);           /* TT cream, slightly see-through */
+        -webkit-backdrop-filter: blur(10px) saturate(1.2);
+        backdrop-filter: blur(10px) saturate(1.2);
+        border: 1px solid rgba(139, 144, 100, 0.28);
+        border-left: 3px solid var(--tt-olive);
+        border-radius: 10px;
+        box-shadow: 0 8px 24px rgba(26, 26, 23, 0.10), 0 1px 3px rgba(26, 26, 23, 0.06);
+        color: var(--tt-ink);
+        font-size: 0.8rem; font-weight: 400; line-height: 1.55; letter-spacing: 0.005em;
+        padding: 10px 14px 10px 12px;
         pointer-events: none;
       }
-      .tt-has-tip:hover .tt-tip-text, .tt-has-tip:focus .tt-tip-text { visibility: visible; opacity: 1; }
+      .tt-tip-text::before {                               /* small pointer toward the label */
+        content: ""; position: absolute; top: -6px; left: 18px;
+        width: 10px; height: 10px; transform: rotate(45deg);
+        background: rgba(250, 249, 245, 0.96);
+        border-top: 1px solid rgba(139, 144, 100, 0.28);
+        border-left: 1px solid rgba(139, 144, 100, 0.28);
+        border-top-left-radius: 2px;
+      }
+      .tt-has-tip:hover .tt-tip-text, .tt-has-tip:focus .tt-tip-text {
+        visibility: visible; opacity: 1; transform: translateY(0);
+      }
       /* Let the tooltip float over the widget below instead of being clipped */
       [data-testid="stElementContainer"]:has(.tt-has-tip),
       .element-container:has(.tt-has-tip) { position: relative; z-index: 50; overflow: visible !important; }
