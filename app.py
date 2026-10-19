@@ -125,7 +125,7 @@ st.markdown(
         transition: opacity 0.16s ease, transform 0.16s ease, visibility 0.16s;
         position: absolute; left: -6px; top: calc(100% + 10px); z-index: 1000;
         width: max-content; max-width: min(420px, 85vw);
-        background: rgba(250, 249, 245, 0.88);           /* TT cream, slightly see-through */
+        background: rgba(250, 249, 245, 0.97);           /* TT cream; masks text underneath */
         -webkit-backdrop-filter: blur(10px) saturate(1.2);
         backdrop-filter: blur(10px) saturate(1.2);
         border: 1px solid rgba(139, 144, 100, 0.28);
@@ -140,7 +140,7 @@ st.markdown(
       .tt-tip-text::before {                               /* small pointer toward the label */
         content: ""; position: absolute; top: -6px; left: 18px;
         width: 10px; height: 10px; transform: rotate(45deg);
-        background: rgba(250, 249, 245, 0.96);
+        background: rgba(250, 249, 245, 0.99);
         border-top: 1px solid rgba(139, 144, 100, 0.28);
         border-left: 1px solid rgba(139, 144, 100, 0.28);
         border-top-left-radius: 2px;
@@ -150,7 +150,12 @@ st.markdown(
       }
       /* Let the tooltip float over the widget below instead of being clipped */
       [data-testid="stElementContainer"]:has(.tt-has-tip),
-      .element-container:has(.tt-has-tip) { position: relative; z-index: 50; overflow: visible !important; }
+      .element-container:has(.tt-has-tip) { position: relative; z-index: 5; overflow: visible !important; }
+      /* The label being hovered rises above everything below it (incl. the next label) */
+      [data-testid="stElementContainer"]:has(.tt-has-tip:hover),
+      [data-testid="stElementContainer"]:has(.tt-has-tip:focus),
+      .element-container:has(.tt-has-tip:hover),
+      .element-container:has(.tt-has-tip:focus) { z-index: 1000; }
       [data-testid="stMarkdownContainer"]:has(.tt-has-tip) { overflow: visible !important; }
 
       /* Keep the logo fully visible: square edges, no crop */
