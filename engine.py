@@ -61,8 +61,14 @@ AGE_BANDS = [
     (90, None, "90+ days", PatternFill(start_color="FFF0A8A8", end_color="FFF0A8A8", fill_type="solid")),
 ]
 DATE_FMT = "yyyy-mm-dd"
-CLOSED_WINDOWS = (30, 60, 90)                       # "closed in the last N days" (cumulative)
-CLOSED_COLOURS = ("#C6E0B4", "#D5E8C8", "#E2EFDA")  # log Closed green, lighter for longer windows
+# Items closed recently: non-overlapping bands of days since Date Closed (inclusive),
+# plus a total card covering all of them. (min_days, max_days, label, colour)
+CLOSED_BANDS = (
+    (0, 29, "Last 30 days", "#C6E0B4"),      # log Closed green
+    (30, 59, "30–59 days ago", "#D5E8C8"),
+    (60, 90, "60–90 days ago", "#E2EFDA"),
+)
+CLOSED_TOTAL = (0, 90, "Total, last 90 days", "#A9D08E")
 TEXT_FIELDS = ("Description", "Recommended Action", "Remarks")  # left + vertically centered
 CLOSED_WORDS = ("closed", "close")
 
@@ -517,19 +523,21 @@ def _add_summary_sheet(wb, ws, profile, n, project_name):
     _card_row(sm, 12, cards, _CARDS4)
     age_counts = ",".join(f"{c1}13" for c1, _c2 in _CARDS4)
 
-    # Items closed recently: three cumulative windows
+    # Items closed recently: three separate bands plus a 90-day total
     _section_row(sm, 17, "Items closed recently")
     cards = []
-    for w, colour in zip(CLOSED_WINDOWS, CLOSED_COLOURS):
-        win = f'{D},">="&({R}-{w}),{D},"<="&{R}'
+    for lo, hi, label, colour in (*CLOSED_BANDS, CLOSED_TOTAL):
+        a, b = f"({R}-{hi})", f"({R}-{lo})"
+        win = f'{D},">="&{a},{D},"<="&{b}'
         cards.append({
             "count": f'=COUNTIFS({S},"Closed",{win})+COUNTIFS({S},"Close",{win})',
-            "label": f"Closed in the last {w} days", "colour": colour,
-            "detail": f'="Since "&TEXT({R}-{w},"mmm d, yyyy")',
+            "label": label, "colour": colour,
+            "detail": (f'=TEXT({a},IF(YEAR({a})=YEAR({b}),"mmm d","mmm d, yyyy"))'
+                       f'&" – "&TEXT({b},"mmm d, yyyy")'),
         })
-    _card_row(sm, 19, cards, _CARDS3)
-    sm["A23"] = ("Counts are cumulative (the 60- and 90-day figures include items closed more recently) "
-                 "and are based on each item's Date Closed.")
+    _card_row(sm, 19, cards, _CARDS4)
+    sm["A23"] = ("The first three counts do not overlap; the total is their sum. "
+                 "Based on each item's Date Closed.")
     sm["A23"].font = _sfont(8, color=_S_MUTED)
 
     # Notes (live)
