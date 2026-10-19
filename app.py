@@ -16,6 +16,7 @@ import streamlit as st
 from PIL import Image
 
 import base64
+import html
 
 import engine
 
@@ -29,10 +30,17 @@ _BUILDING_B64 = _icon_b64("building.png")
 _MAGNIFIER_B64 = _icon_b64("clipboard.png")
 _LINK_B64 = _icon_b64("link.png")
 
-def field_label(icon_b64, text):
-    st.markdown(
-        f'<div class="tt-field-label">'
-        f'<img src="data:image/png;base64,{icon_b64}"/> {text}</div>',
+def field_label(icon_b64, text, tip=None, container=None):
+    """Icon + text label for an input. With `tip`, an (i) icon is added and the
+    explanation shows only while the mouse is over the label (or it has focus)."""
+    tip_html = ""
+    if tip:
+        tip_html = ('<span class="tt-tip-icon" aria-hidden="true">i</span>'
+                    f'<span class="tt-tip-text" role="tooltip">{html.escape(tip)}</span>')
+    cls, attrs = ("tt-field-label tt-has-tip", ' tabindex="0"') if tip else ("tt-field-label", "")
+    (container or st).markdown(
+        f'<div class="{cls}"{attrs}>'
+        f'<img src="data:image/png;base64,{icon_b64}"/> {text}{tip_html}</div>',
         unsafe_allow_html=True,
     )
 
@@ -100,6 +108,30 @@ st.markdown(
       }
       .tt-field-label img { height: 20px; width: 20px; object-fit: contain; }
 
+      /* Hover-only explanations on field labels */
+      .tt-has-tip { position: relative; cursor: help; width: fit-content; outline: none; }
+      .tt-tip-icon {
+        display: inline-flex; align-items: center; justify-content: center;
+        width: 15px; height: 15px; border-radius: 50%;
+        border: 1.5px solid var(--tt-gray); color: var(--tt-gray);
+        font-size: 10px; font-weight: 700; font-style: italic; font-family: Georgia, serif;
+      }
+      .tt-tip-text {
+        visibility: hidden; opacity: 0; transition: opacity 0.12s ease-in;
+        position: absolute; left: 0; top: calc(100% + 6px); z-index: 1000;
+        width: max-content; max-width: min(460px, 85vw);
+        background: var(--tt-ink); color: #FFFFFF;
+        font-size: 0.8rem; font-weight: 400; line-height: 1.4;
+        padding: 8px 11px; border-radius: 6px;
+        box-shadow: 0 4px 14px rgba(0, 0, 0, 0.18);
+        pointer-events: none;
+      }
+      .tt-has-tip:hover .tt-tip-text, .tt-has-tip:focus .tt-tip-text { visibility: visible; opacity: 1; }
+      /* Let the tooltip float over the widget below instead of being clipped */
+      [data-testid="stElementContainer"]:has(.tt-has-tip),
+      .element-container:has(.tt-has-tip) { position: relative; z-index: 50; overflow: visible !important; }
+      [data-testid="stMarkdownContainer"]:has(.tt-has-tip) { overflow: visible !important; }
+
       /* Keep the logo fully visible: square edges, no crop */
       [data-testid="stImage"] img, .stImage img {
         border-radius: 0 !important;
@@ -140,7 +172,9 @@ except AttributeError:
     )
 
 # PlanRadar access: Yes adds the "Link to ticket" column, No leaves it out
-field_label(_LINK_B64, "Does the contractor have PlanRadar access?")
+field_label(_LINK_B64, "Does the contractor have PlanRadar access?",
+            tip="Yes includes the PlanRadar Link to ticket column in the log. "
+                "No leaves it out, since the contractor can't open the links.")
 _pr_options = ["Yes", "No"]
 try:
     _pr = st.segmented_control(
@@ -151,13 +185,11 @@ except AttributeError:
     _pr = st.radio("PlanRadar access", options=_pr_options, horizontal=True,
                    label_visibility="collapsed", key="planradar_access")
 planradar_access = _pr == "Yes"
-st.caption("Yes includes the PlanRadar **Link to ticket** column in the log. "
-           "No leaves it out, since the contractor can't open the links.")
 
 # Log type buttons (same style as Inspection type) for each inspection type
 log_variant = None
 if insp_type in engine.LOG_VARIANTS:
-    field_label(_MAGNIFIER_B64, "Log type")
+    _log_label = st.empty()   # filled below, once the chosen log type is known
     _variants = list(engine.LOG_VARIANTS[insp_type].keys())
     try:
         log_variant = st.segmented_control(
@@ -170,8 +202,7 @@ if insp_type in engine.LOG_VARIANTS:
             label_visibility="collapsed", key=f"log_type_{insp_type}",
         )
     _note = engine.get_profile(engine.resolve_profile_key(insp_type, log_variant)).ui_note
-    if _note:
-        st.caption(_note)
+    field_label(_MAGNIFIER_B64, "Log type", tip=_note or None, container=_log_label)
 profile_key = engine.resolve_profile_key(insp_type, log_variant)
 
 _profile = engine.with_planradar_link(engine.get_profile(profile_key), planradar_access)
@@ -251,14 +282,14 @@ if uploaded is not None:
     if _profile.age_highlight:
         import summary_pdf
         st.subheader("Summary PDF")
-        st.caption("One-page summary of open items in each age category, with the project name "
-                   "and today's date as the date of distribution.")
         _pdf = summary_pdf.build_summary_pdf(df, _profile, project.strip() or "134 Jane Street")
         st.download_button(
             "📄 Generate summary PDF",
             data=_pdf,
             file_name=out_name.replace(".xlsx", "_Summary.pdf"),
             mime="application/pdf",
+            help="One-page summary of open items in each age category, with the project name "
+                 "and today's date as the date of distribution.",
         )
 else:
     st.info("Awaiting a CSV upload to begin.")
