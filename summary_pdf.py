@@ -25,8 +25,7 @@ TT_OLIVE = HexColor("#839058")
 TT_TERRA = HexColor("#D53822")
 LIGHT_RULE = HexColor("#C9C9CC")
 MUTED = HexColor("#6E6E76")
-CLOSED_WINDOWS = engine.CLOSED_WINDOWS       # shared with the Excel summary sheet
-CLOSED_COLOURS = engine.CLOSED_COLOURS
+CLOSED_CARDS = (*engine.CLOSED_BANDS, engine.CLOSED_TOTAL)  # shared with the Excel summary sheet
 FONT, FONT_LIGHT, FONT_BOLD = "Helvetica", "Helvetica", "Helvetica-Bold"  # Univers stand-in
 
 
@@ -68,7 +67,8 @@ def age_summary(df: pd.DataFrame, ref_date: date | None = None) -> dict:
     dc_col = engine._resolve_field("Date Closed", df)
     closed_dt = pd.to_datetime(df[dc_col], errors="coerce") if dc_col else pd.Series(pd.NaT, index=df.index)
     closed_ages = (pd.Timestamp(ref) - closed_dt).dt.days[~is_open]
-    recent = {w: int(((closed_ages >= 0) & (closed_ages <= w)).sum()) for w in CLOSED_WINDOWS}
+    recent = {(lo, hi): int(((closed_ages >= lo) & (closed_ages <= hi)).sum())
+              for lo, hi, _l, _c in CLOSED_CARDS}
     closed_undated = int(closed_ages.isna().sum())
 
     oldest = None
@@ -124,6 +124,11 @@ def _cards(c, card_top, items, card_h=92, band_h=10, gap=12):
         c.setFillColor(MUTED)
         c.setFont(FONT, 8)
         c.drawCentredString(cx, _y(card_top + 84), it["detail"])
+
+
+def _range(start: date, end: date) -> str:
+    first = f"{start:%b} {start.day}" + (f", {start.year}" if start.year != end.year else "")
+    return f"{first} – {_short_date(end)}"
 
 
 def _fmt_date(d: date) -> str:
@@ -208,16 +213,17 @@ def build_summary_pdf(df: pd.DataFrame, profile, project_name: str,
     else:
         c.rect(MARGIN, _y(bar_top + bar_h), CONTENT_W, bar_h, stroke=1, fill=0)
 
-    # Items closed recently: three cumulative windows
+    # Items closed recently: three separate bands plus a 90-day total
     _section(c, 420, "Items closed recently")
+    ref = s["ref_date"]
     _cards(c, 438, [{
-        "count": s["closed_recent"][w], "label": f"Closed in the last {w} days", "colour": colour,
-        "detail": f"Since {_short_date(s['ref_date'] - timedelta(days=w))}",
-    } for w, colour in zip(CLOSED_WINDOWS, CLOSED_COLOURS)])
+        "count": s["closed_recent"][(lo, hi)], "label": label, "colour": colour,
+        "detail": _range(ref - timedelta(days=hi), ref - timedelta(days=lo)),
+    } for lo, hi, label, colour in CLOSED_CARDS])
     c.setFont(FONT, 8)
     c.setFillColor(MUTED)
-    c.drawString(MARGIN, _y(544), "Counts are cumulative (the 60- and 90-day figures include items closed more "
-                 "recently) and are based on each item's Date Closed.")
+    c.drawString(MARGIN, _y(544), "The first three counts do not overlap; the total is their sum. "
+                 "Based on each item's Date Closed.")
 
     # Notes
     y = 572
