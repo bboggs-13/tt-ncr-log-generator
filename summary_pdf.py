@@ -100,9 +100,10 @@ def _short_date(d: date) -> str:
     return f"{d:%b} {d.day}, {d.year}"
 
 
-def _cards(c, card_top, items, card_h=104, band_h=10, gap=12):
-    """Row of four equal cards: colour band, big count, label and two detail lines."""
-    card_w = (CONTENT_W - 3 * gap) / 4
+def _cards(c, card_top, items, card_h=92, band_h=10, gap=12):
+    """Row of equal cards spanning the content width: colour band, count, label, detail."""
+    n = len(items)
+    card_w = (CONTENT_W - (n - 1) * gap) / n
     for i, it in enumerate(items):
         x = MARGIN + i * (card_w + gap)
         c.setStrokeColor(LIGHT_RULE)
@@ -117,13 +118,12 @@ def _cards(c, card_top, items, card_h=104, band_h=10, gap=12):
         cx = x + card_w / 2
         c.setFillColor(TT_GRAY)
         c.setFont(FONT_BOLD, 34)
-        c.drawCentredString(cx, _y(card_top + 56), str(it["count"]))
+        c.drawCentredString(cx, _y(card_top + 54), str(it["count"]))
         c.setFont(FONT_BOLD, 10)
-        c.drawCentredString(cx, _y(card_top + 76), it["label"])
+        c.drawCentredString(cx, _y(card_top + 72), it["label"])
         c.setFillColor(MUTED)
         c.setFont(FONT, 8)
-        c.drawCentredString(cx, _y(card_top + 89), it["line1"])
-        c.drawCentredString(cx, _y(card_top + 99), it["line2"])
+        c.drawCentredString(cx, _y(card_top + 84), it["detail"])
 
 
 def _fmt_date(d: date) -> str:
@@ -179,17 +179,16 @@ def build_summary_pdf(df: pd.DataFrame, profile, project_name: str,
     c.setLineWidth(0.5)
     c.line(MARGIN, _y(top + 28), MARGIN + CONTENT_W, _y(top + 28))
 
-    # Four category cards
-    _section(c, 214, "Open items by age")
+    # Open items by age: four cards (same bands as the log highlighting)
+    _section(c, 214, "Open items by days since observation")
     _cards(c, 232, [{
         "count": cat["count"], "label": cat["label"], "colour": cat["colour"],
-        "line1": f"{cat['count'] / n_open:.0%} of open items" if n_open else "—",
-        "line2": "No highlight" if not cat["colour"] else f"{cat['swatch']} in log",
+        "detail": "Not highlighted in log" if not cat["colour"] else f"Highlighted {cat['swatch'].lower()} in log",
     } for cat in cats])
 
     # Distribution bar
-    bar_top, bar_h = 384, 16
-    _section(c, 368, "Distribution of open items")
+    bar_top, bar_h = 372, 16
+    _section(c, 356, "Distribution of open items")
     c.setStrokeColor(LIGHT_RULE)
     c.setLineWidth(0.75)
     dated_total = sum(cat["count"] for cat in cats)
@@ -209,27 +208,19 @@ def build_summary_pdf(df: pd.DataFrame, profile, project_name: str,
     else:
         c.rect(MARGIN, _y(bar_top + bar_h), CONTENT_W, bar_h, stroke=1, fill=0)
 
-    # Recently closed cards (cumulative windows) + items closed without a date
-    _section(c, 432, "Recently closed items")
-    n_closed = s["closed"]
-    pct = lambda k: f"{k / n_closed:.0%} of closed items" if n_closed else "—"
-    closed_cards = [{
-        "count": s["closed_recent"][w], "label": f"Last {w} days", "colour": colour,
-        "line1": pct(s["closed_recent"][w]),
-        "line2": f"Closed since {_short_date(s['ref_date'] - timedelta(days=w))}",
-    } for w, colour in zip(CLOSED_WINDOWS, CLOSED_COLOURS)]
-    closed_cards.append({
-        "count": s["closed_undated"], "label": "No Date Closed", "colour": None,
-        "line1": pct(s["closed_undated"]), "line2": "Not counted in windows",
-    })
-    _cards(c, 450, closed_cards)
+    # Items closed recently: three cumulative windows
+    _section(c, 420, "Items closed recently")
+    _cards(c, 438, [{
+        "count": s["closed_recent"][w], "label": f"Closed in the last {w} days", "colour": colour,
+        "detail": f"Since {_short_date(s['ref_date'] - timedelta(days=w))}",
+    } for w, colour in zip(CLOSED_WINDOWS, CLOSED_COLOURS)])
     c.setFont(FONT, 8)
     c.setFillColor(MUTED)
-    c.drawString(MARGIN, _y(568), "Counts are cumulative (the 60-day figure includes the last 30 days) "
-                 "and use each closed item's Date Closed.")
+    c.drawString(MARGIN, _y(544), "Counts are cumulative (the 60- and 90-day figures include items closed more "
+                 "recently) and are based on each item's Date Closed.")
 
     # Notes
-    y = 596
+    y = 572
     _section(c, y, "Notes")
     notes = [
         f"Ages are counted from each item's Observation Date to the date of distribution "
