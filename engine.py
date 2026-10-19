@@ -12,7 +12,7 @@ from __future__ import annotations
 import colorsys
 import io
 from copy import copy
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import date, datetime
 from pathlib import Path
 
@@ -224,6 +224,48 @@ def get_profile(key: str) -> Profile:
     return PROFILES.get(key, PROFILES[DEFAULT_PROFILE])
 
 
+# PlanRadar link column: added as the last column when the contractor has PlanRadar
+# access, left out when they don't (the link is no use to them).
+LINK_FIELD = "Link to ticket"
+LINK_WIDTH = 67.86  # same width as the link column in the Special templates
+
+
+def with_planradar_link(profile: Profile, include: bool) -> Profile:
+    """Return the profile with the PlanRadar link column added or removed."""
+    has = LINK_FIELD in profile.column_map
+    if include and not has:
+        col = profile.last_col + 1
+        return replace(profile,
+                       column_map={**profile.column_map, LINK_FIELD: get_column_letter(col)},
+                       center_columns=[*profile.center_columns, col], last_col=col)
+    if not include and has:
+        col = column_index_from_string(profile.column_map[LINK_FIELD])
+        assert col == profile.last_col, "link column must be the last column"
+        return replace(profile,
+                       column_map={k: v for k, v in profile.column_map.items() if k != LINK_FIELD},
+                       center_columns=[c for c in profile.center_columns if c != col],
+                       last_col=col - 1)
+    return profile
+
+
+def _fit_link_column(ws, profile: Profile):
+    """Make the template's header row match the profile's link setting."""
+    link = profile.column_map.get(LINK_FIELD)
+    if link:
+        head = ws[f"{link}{HEADER_ROW}"]
+        if head.value != LINK_FIELD:  # template has no link column: style it like its neighbour
+            prev = ws.cell(HEADER_ROW, profile.last_col - 1)
+            head.value = LINK_FIELD
+            for attr in ("font", "fill", "alignment", "border", "number_format", "protection"):
+                setattr(head, attr, copy(getattr(prev, attr)))
+        ws.column_dimensions[link].width = LINK_WIDTH
+    else:
+        col = profile.last_col + 1
+        if ws.cell(HEADER_ROW, col).value == LINK_FIELD:  # template has one: drop it
+            ws.delete_cols(col)
+            ws.column_dimensions.pop(get_column_letter(col), None)
+
+
 def _resolve_field(field_name: str, df: pd.DataFrame):
     """Return the actual CSV column for a logical field, honoring aliases."""
     if field_name in df.columns:
@@ -261,9 +303,11 @@ def validate(df: pd.DataFrame, profile: Profile):
         actual = _resolve_field(fld, df)
         if actual:
             mapped.add(actual)
-    unknown = [c for c in df.columns if c not in mapped]
+    unknown = [c for c in df.columns if c not in mapped and c != LINK_FIELD]
     if unknown:
         msgs.append(f"Note: unmapped columns will be ignored: {', '.join(unknown)}")
+    if LINK_FIELD in profile.column_map and _resolve_field(LINK_FIELD, df) is None:
+        msgs.append(f"Note: no '{LINK_FIELD}' column in the CSV, so the link column is left blank.")
     ok = not missing and not df.empty
     return ok, msgs
 
@@ -576,6 +620,7 @@ def build_workbook(df: pd.DataFrame, profile: Profile, project_name: str = "134 
     ws = wb.worksheets[0]
     ws.title = SHEET_TITLES.get(profile.key, "Log")
     ws._images = []  # we place exactly one logo
+    _fit_link_column(ws, profile)
 
     first_col, last_col = 1, profile.last_col
     status_col = profile.status_col
@@ -684,6 +729,7 @@ def build_workbook(df: pd.DataFrame, profile: Profile, project_name: str = "134 
         ("Inspection type", profile.label),
         ("Aging reference date", ws["C5"].value.strftime("%Y-%m-%d") if profile.age_highlight else "n/a"),
         ("Template", profile.template),
+        ("PlanRadar link column", "Included" if LINK_FIELD in profile.column_map else "Omitted (no PlanRadar access)"),
         ("Default filter", f"Open items only ({hidden_closed} closed hidden)" if hidden_closed else "None"),
         ("Rows imported", n),
         ("Project", project_name),
@@ -697,9 +743,12 @@ def build_workbook(df: pd.DataFrame, profile: Profile, project_name: str = "134 
 
 
 def process_csv_bytes(csv_bytes: bytes, inspection_type: str = DEFAULT_PROFILE,
-                      project_name: str = "134 Jane Street"):
-    """Full pipeline. Returns (xlsx_bytes_or_None, df, messages)."""
-    profile = get_profile(inspection_type)
+                      project_name: str = "134 Jane Street", planradar_access: bool = True):
+    """Full pipeline. Returns (xlsx_bytes_or_None, df, messages).
+
+    planradar_access: True adds the PlanRadar "Link to ticket" column, False leaves it out.
+    """
+    profile = with_planradar_link(get_profile(inspection_type), planradar_access)
     df = pd.read_csv(io.BytesIO(csv_bytes), dtype=str).fillna("")
     ok, msgs = validate(df, profile)
     if not ok:
