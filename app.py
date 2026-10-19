@@ -27,6 +27,7 @@ def _icon_b64(name):
 _PAPERCLIP_B64 = _icon_b64("paperclip.png")
 _BUILDING_B64 = _icon_b64("building.png")
 _MAGNIFIER_B64 = _icon_b64("clipboard.png")
+_LINK_B64 = _icon_b64("link.png")
 
 def field_label(icon_b64, text):
     st.markdown(
@@ -112,7 +113,7 @@ st.markdown(
 
 # --- Header ---
 st.image(str(engine.LOGO_PATH), width=280)
-st.markdown('<div class="tt-eyebrow">Façade Engineering · Site Inspections</div>', unsafe_allow_html=True)
+st.markdown('<div class="tt-eyebrow">Façade Engineering · Quality Control</div>', unsafe_allow_html=True)
 st.title("NCR Log Generator")
 st.markdown('<hr class="tt-rule">', unsafe_allow_html=True)
 st.caption(
@@ -138,6 +139,21 @@ except AttributeError:
         horizontal=True, label_visibility="collapsed",
     )
 
+# PlanRadar access: Yes adds the "Link to ticket" column, No leaves it out
+field_label(_LINK_B64, "Does the contractor have PlanRadar access?")
+_pr_options = ["Yes", "No"]
+try:
+    _pr = st.segmented_control(
+        "PlanRadar access", options=_pr_options, default="Yes",
+        label_visibility="collapsed", key="planradar_access",
+    ) or "Yes"
+except AttributeError:
+    _pr = st.radio("PlanRadar access", options=_pr_options, horizontal=True,
+                   label_visibility="collapsed", key="planradar_access")
+planradar_access = _pr == "Yes"
+st.caption("Yes includes the PlanRadar **Link to ticket** column in the log. "
+           "No leaves it out, since the contractor can't open the links.")
+
 # Log type buttons (same style as Inspection type) for each inspection type
 log_variant = None
 if insp_type in engine.LOG_VARIANTS:
@@ -158,7 +174,7 @@ if insp_type in engine.LOG_VARIANTS:
         st.caption(_note)
 profile_key = engine.resolve_profile_key(insp_type, log_variant)
 
-_profile = engine.get_profile(profile_key)
+_profile = engine.with_planradar_link(engine.get_profile(profile_key), planradar_access)
 with st.expander(f"Expected CSV columns — {_profile.label}"):
     st.write(", ".join(engine.expected_columns(_profile)))
     st.write(f"**Required:** {', '.join(_profile.required_columns)}")
@@ -181,6 +197,7 @@ if uploaded is not None:
         xlsx, df, msgs = engine.process_csv_bytes(
             csv_bytes, inspection_type=profile_key,
             project_name=project.strip() or "134 Jane Street",
+            planradar_access=planradar_access,
         )
     except Exception as e:  # noqa: BLE001
         st.error(f"Could not read the CSV: {e}")
