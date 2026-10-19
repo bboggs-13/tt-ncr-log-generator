@@ -23,7 +23,7 @@ from openpyxl.drawing.spreadsheet_drawing import OneCellAnchor, AnchorMarker
 from openpyxl.drawing.xdr import XDRPositiveSize2D
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.worksheet.datavalidation import DataValidation
-from openpyxl.utils import get_column_letter
+from openpyxl.utils import column_index_from_string, get_column_letter
 from openpyxl.formatting.rule import FormulaRule
 
 ASSETS = Path(__file__).parent / "assets"
@@ -370,7 +370,33 @@ def _write_legend(ws, profile, title, rows):
 
 # ---------------------------------------------------------------- summary sheet
 _S_GRAY, _S_OLIVE, _S_MUTED, _S_RULE = "FF42424A", "FF839058", "FF6E6E76", "FFC9C9CC"
-_CARD_COLS = ("A", "C", "E", "G")    # four cards; B, D, F are narrow gutters
+
+
+def _summary_grid(card_px=173, gap_px=18):
+    """Column grid where a 4-card row and a 3-card row both span the same width.
+
+    Column edges are the union of both rows' card/gutter edges, so every card is a
+    merge of whole columns. Returns (column widths in Excel units, 4-card spans, 3-card spans).
+    """
+    total = 4 * card_px + 3 * gap_px
+    wide = (total - 2 * gap_px) / 3
+    def spans(n, w):
+        return [(i * (w + gap_px), i * (w + gap_px) + w) for i in range(n)]
+    four, three = spans(4, card_px), spans(3, wide)
+    edges = sorted({round(e, 2) for a, b in four + three for e in (a, b)})
+    widths = [(b - a - 5) / 7 for a, b in zip(edges, edges[1:])]  # px -> Excel char width
+    def cols(row):
+        out = []
+        for a, b in row:
+            first = edges.index(round(a, 2)) + 1
+            last = edges.index(round(b, 2))
+            out.append((get_column_letter(first), get_column_letter(last)))
+        return out
+    return widths, cols(four), cols(three)
+
+
+_GRID_WIDTHS, _CARDS4, _CARDS3 = _summary_grid()
+_LAST_COL = get_column_letter(len(_GRID_WIDTHS))
 
 
 def _sfont(size=10, bold=False, color=_S_GRAY):
@@ -381,33 +407,37 @@ def _section_row(sm, r, title):
     sm[f"A{r}"] = title.upper()
     sm[f"A{r}"].font = _sfont(9, True)
     rule = Side(style="thin", color=_S_GRAY)
-    for col in "ABCDEFG":
-        sm[f"{col}{r}"].border = Border(bottom=rule)
+    for c in range(1, len(_GRID_WIDTHS) + 1):
+        sm.cell(r, c).border = Border(bottom=rule)
     sm.row_dimensions[r].height = 18
 
 
-def _card_row(sm, top, cards):
-    """Five-row card: colour band, big count, label, two detail lines (all centred)."""
+def _card_row(sm, top, cards, spans):
+    """Four-row cards: colour band, count, label, detail line (each row merged across the card)."""
     edge = Side(style="thin", color=_S_RULE)
     sm.row_dimensions[top].height = 8
     sm.row_dimensions[top + 1].height = 40
-    for col, card in zip(_CARD_COLS, cards):
-        for i in range(5):
-            cell = sm[f"{col}{top + i}"]
-            cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
-            cell.border = Border(left=edge, right=edge,
-                                 top=edge if i in (0, 1) else None, bottom=edge if i == 4 else None)
-        if card["colour"]:
-            hexc = "FF" + card["colour"].lstrip("#")
-            sm[f"{col}{top}"].fill = PatternFill(start_color=hexc, end_color=hexc, fill_type="solid")
-        sm[f"{col}{top + 1}"] = card["count"]
-        sm[f"{col}{top + 1}"].font = _sfont(26, True)
-        sm[f"{col}{top + 2}"] = card["label"]
-        sm[f"{col}{top + 2}"].font = _sfont(10, True)
-        sm[f"{col}{top + 3}"] = card["line1"]
-        sm[f"{col}{top + 3}"].font = _sfont(8, color=_S_MUTED)
-        sm[f"{col}{top + 4}"] = card["line2"]
-        sm[f"{col}{top + 4}"].font = _sfont(8, color=_S_MUTED)
+    sm.row_dimensions[top + 2].height = 16
+    sm.row_dimensions[top + 3].height = 16
+    fonts = [None, _sfont(26, True), _sfont(10, True), _sfont(8, color=_S_MUTED)]
+    for (c1, c2), card in zip(spans, cards):
+        i1, i2 = column_index_from_string(c1), column_index_from_string(c2)
+        for k in range(4):
+            r = top + k
+            if i2 > i1:
+                sm.merge_cells(f"{c1}{r}:{c2}{r}")
+            for ci in range(i1, i2 + 1):
+                cell = sm.cell(r, ci)
+                cell.border = Border(left=edge if ci == i1 else None, right=edge if ci == i2 else None,
+                                     top=edge if k in (0, 1) else None, bottom=edge if k == 3 else None)
+                if k == 0 and card["colour"]:
+                    hexc = "FF" + card["colour"].lstrip("#")
+                    cell.fill = PatternFill(start_color=hexc, end_color=hexc, fill_type="solid")
+            head = sm[f"{c1}{r}"]
+            head.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+            if k:
+                head.value = (card["count"], card["label"], card["detail"])[k - 1]
+                head.font = fonts[k]
 
 
 def _add_summary_sheet(wb, ws, profile, n, project_name):
@@ -429,10 +459,8 @@ def _add_summary_sheet(wb, ws, profile, n, project_name):
     kind = "Special Inspections" if profile.key.startswith("special") else "Regular Site Inspections"
 
     sm.sheet_view.showGridLines = False
-    for col in _CARD_COLS:
-        sm.column_dimensions[col].width = 24
-    for col in "BDF":
-        sm.column_dimensions[col].width = 2.5
+    for idx, w in enumerate(_GRID_WIDTHS, start=1):
+        sm.column_dimensions[get_column_letter(idx)].width = round(w, 2)
 
     # Logo, same size and position as the log
     from PIL import Image as PILImage
@@ -449,73 +477,75 @@ def _add_summary_sheet(wb, ws, profile, n, project_name):
     sm["A5"] = f"{kind}  ·  Open items by days since observation"
     sm["A5"].font = _sfont(11, color=_S_OLIVE)
 
-    # Project / distribution details
-    for col, label in zip(_CARD_COLS, ("Project", "Date of distribution", "Open items", "Closed items")):
+    # Project / distribution details, aligned to the four card columns
+    first = [c1 for c1, _c2 in _CARDS4]
+    for col, label in zip(first, ("Project", "Date of distribution", "Open items", "Closed items")):
         sm[f"{col}7"] = label.upper()
         sm[f"{col}7"].font = _sfont(7.5, True, _S_MUTED)
-    sm["A8"] = project_name
-    sm["C8"] = f"={R}"
-    sm["C8"].number_format = "mmmm d, yyyy"
-    sm["G8"] = f'=COUNTIF({S},"Closed")+COUNTIF({S},"Close")'
-    sm["E8"] = f"={n}-G8"
+    p_col, d_col, o_col, c_col = first
+    sm[f"{p_col}8"] = project_name
+    sm[f"{d_col}8"] = f"={R}"
+    sm[f"{d_col}8"].number_format = "mmmm d, yyyy"
+    sm[f"{c_col}8"] = f'=COUNTIF({S},"Closed")+COUNTIF({S},"Close")'
+    sm[f"{o_col}8"] = f"={n}-{c_col}8"
+    open_ref = f"${o_col}$8"
     rule = Side(style="thin", color=_S_RULE)
-    for col in "ABCDEFG":
-        cell = sm[f"{col}8"]
+    for ci in range(1, len(_GRID_WIDTHS) + 1):
+        cell = sm.cell(8, ci)
         cell.font = _sfont(12)
         cell.alignment = Alignment(horizontal="left", vertical="center")
         cell.border = Border(bottom=rule)
+    for c1, c2 in _CARDS4:            # merge each detail across its card's columns
+        if c1 != c2:
+            sm.merge_cells(f"{c1}7:{c2}7")
+            sm.merge_cells(f"{c1}8:{c2}8")
     sm.row_dimensions[8].height = 22
 
-    # Open items by age (same bands as the log highlighting)
-    _section_row(sm, 10, "Open items by age")
+    # Open items by days since observation (same bands as the log highlighting)
+    _section_row(sm, 10, "Open items by days since observation")
     bounds = [("", f'">"&({R}-30)')] + [
         (f'"<="&({R}-{lo})', f'">"&({R}-{hi})' if hi else "") for lo, hi, _l, _f in AGE_BANDS]
     labels = ["Less than 30 days"] + [f"{lo}–{hi - 1} days" if hi else f"{lo}+ days" for lo, hi, _l, _f in AGE_BANDS]
     colours = [None] + ["#" + f.fgColor.rgb[-6:] for _lo, _hi, _l, f in AGE_BANDS]
-    swatches = ["No highlight", "Yellow in log", "Orange in log", "Red in log"]
+    details = ["Not highlighted in log", "Highlighted yellow in log",
+               "Highlighted orange in log", "Highlighted red in log"]
     cards = []
-    for col, (upper, lower), label, colour, sw in zip(_CARD_COLS, bounds, labels, colours, swatches):
+    for (upper, lower), label, colour, detail in zip(bounds, labels, colours, details):
         crit = "".join(f",{O},{c}" for c in (upper, lower) if c)
-        cards.append({"count": f"=COUNTIFS({not_closed}{crit})", "label": label, "colour": colour,
-                      "line1": f'=IF($E$8=0,"—",TEXT({col}13/$E$8,"0%")&" of open items")', "line2": sw})
-    _card_row(sm, 12, cards)
+        cards.append({"count": f"=COUNTIFS({not_closed}{crit})", "label": label,
+                      "colour": colour, "detail": detail})
+    _card_row(sm, 12, cards, _CARDS4)
+    age_counts = ",".join(f"{c1}13" for c1, _c2 in _CARDS4)
 
-    # Recently closed items (cumulative windows) + closed without a date
-    _section_row(sm, 18, "Recently closed items")
+    # Items closed recently: three cumulative windows
+    _section_row(sm, 17, "Items closed recently")
     cards = []
-    for col, w, colour in zip(_CARD_COLS, CLOSED_WINDOWS, CLOSED_COLOURS):
+    for w, colour in zip(CLOSED_WINDOWS, CLOSED_COLOURS):
         win = f'{D},">="&({R}-{w}),{D},"<="&{R}'
         cards.append({
             "count": f'=COUNTIFS({S},"Closed",{win})+COUNTIFS({S},"Close",{win})',
-            "label": f"Last {w} days", "colour": colour,
-            "line1": f'=IF($G$8=0,"—",TEXT({col}21/$G$8,"0%")&" of closed items")',
-            "line2": f'="Closed since "&TEXT({R}-{w},"mmm d, yyyy")',
+            "label": f"Closed in the last {w} days", "colour": colour,
+            "detail": f'="Since "&TEXT({R}-{w},"mmm d, yyyy")',
         })
-    cards.append({
-        "count": f'=G8-(COUNTIFS({S},"Closed",{D},">0")+COUNTIFS({S},"Close",{D},">0"))',
-        "label": "No Date Closed", "colour": None,
-        "line1": '=IF($G$8=0,"—",TEXT(G21/$G$8,"0%")&" of closed items")',
-        "line2": "Not counted in windows",
-    })
-    _card_row(sm, 20, cards)
-    sm["A25"] = ("Counts are cumulative (the 60-day figure includes the last 30 days) "
-                 "and use each closed item's Date Closed.")
-    sm["A25"].font = _sfont(8, color=_S_MUTED)
+    _card_row(sm, 19, cards, _CARDS3)
+    sm["A23"] = ("Counts are cumulative (the 60- and 90-day figures include items closed more recently) "
+                 "and are based on each item's Date Closed.")
+    sm["A23"].font = _sfont(8, color=_S_MUTED)
 
     # Notes (live)
-    _section_row(sm, 27, "Notes")
+    _section_row(sm, 25, "Notes")
     oldest = f'_xlfn.MINIFS({O},{not_closed})'
     notes = [
         f'="•  Ages are counted from each item’s Observation Date to the date of distribution ("'
         f'&TEXT({R},"mmmm d, yyyy")&"), the same rule used to highlight the Time Sensitive {log_name}."',
         "•  Open items include anything not marked Closed (Open and In Progress).",
-        f'="•  Closed items are excluded from the age counts: "&G8&" of {n} items in this log."',
-        f'=IF(OR($E$8=0,{oldest}=0),"","•  Oldest open item: "&({R}-{oldest})&" days, observed "&TEXT({oldest},"mmmm d, yyyy")&".")',
-        f'=IF($E$8-SUM(A13,C13,E13,G13)>0,"•  "&($E$8-SUM(A13,C13,E13,G13))&" open item(s) have no valid Observation Date and cannot be aged.","")',
+        f'="•  Closed items are excluded from the age counts: "&{c_col}8&" of {n} items in this log."',
+        f'=IF(OR({open_ref}=0,{oldest}=0),"","•  Oldest open item: "&({R}-{oldest})&" days, observed "&TEXT({oldest},"mmmm d, yyyy")&".")',
+        f'=IF({open_ref}-SUM({age_counts})>0,"•  "&({open_ref}-SUM({age_counts}))&" open item(s) have no valid Observation Date and cannot be aged.","")',
     ]
     for i, text in enumerate(notes):
-        r = 29 + i
-        sm.merge_cells(f"A{r}:G{r}")
+        r = 27 + i
+        sm.merge_cells(f"A{r}:{_LAST_COL}{r}")
         sm[f"A{r}"] = text
         sm[f"A{r}"].font = _sfont(9.5)
         sm[f"A{r}"].alignment = Alignment(horizontal="left", vertical="top", wrap_text=True)
@@ -526,7 +556,7 @@ def _add_summary_sheet(wb, ws, profile, n, project_name):
     sm.page_setup.fitToWidth = 1
     sm.page_setup.fitToHeight = 1
     sm.sheet_properties.pageSetUpPr.fitToPage = True
-    sm.print_area = "A1:G34"
+    sm.print_area = f"A1:{_LAST_COL}32"
 
     # Open on the summary (and don't leave the log tab grouped with it)
     ws.sheet_view.tabSelected = False
