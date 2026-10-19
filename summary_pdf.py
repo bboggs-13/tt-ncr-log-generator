@@ -8,7 +8,7 @@ open items only (anything not Closed), aged from Observation Date to the distrib
 from __future__ import annotations
 
 import io
-from datetime import date
+from datetime import date, timedelta
 
 import pandas as pd
 from reportlab.lib.colors import CMYKColor, HexColor, white
@@ -25,7 +25,8 @@ TT_OLIVE = HexColor("#839058")
 TT_TERRA = HexColor("#D53822")
 LIGHT_RULE = HexColor("#C9C9CC")
 MUTED = HexColor("#6E6E76")
-CLOSED_WINDOWS = (30, 60, 90)                # "closed in the last N days" (cumulative)
+CLOSED_WINDOWS = engine.CLOSED_WINDOWS       # shared with the Excel summary sheet
+CLOSED_COLOURS = engine.CLOSED_COLOURS
 FONT, FONT_LIGHT, FONT_BOLD = "Helvetica", "Helvetica", "Helvetica-Bold"  # Univers stand-in
 
 
@@ -95,6 +96,36 @@ def _section(c, top, title):
     c.line(MARGIN, _y(top + 6), MARGIN + CONTENT_W, _y(top + 6))
 
 
+def _short_date(d: date) -> str:
+    return f"{d:%b} {d.day}, {d.year}"
+
+
+def _cards(c, card_top, items, card_h=104, band_h=10, gap=12):
+    """Row of four equal cards: colour band, big count, label and two detail lines."""
+    card_w = (CONTENT_W - 3 * gap) / 4
+    for i, it in enumerate(items):
+        x = MARGIN + i * (card_w + gap)
+        c.setStrokeColor(LIGHT_RULE)
+        c.setLineWidth(0.75)
+        c.setFillColor(white)
+        c.rect(x, _y(card_top + card_h), card_w, card_h, stroke=1, fill=1)
+        if it["colour"]:
+            c.setFillColor(HexColor(it["colour"]))
+            c.rect(x, _y(card_top + band_h), card_w, band_h, stroke=0, fill=1)
+        else:
+            c.line(x, _y(card_top + band_h), x + card_w, _y(card_top + band_h))
+        cx = x + card_w / 2
+        c.setFillColor(TT_GRAY)
+        c.setFont(FONT_BOLD, 34)
+        c.drawCentredString(cx, _y(card_top + 56), str(it["count"]))
+        c.setFont(FONT_BOLD, 10)
+        c.drawCentredString(cx, _y(card_top + 76), it["label"])
+        c.setFillColor(MUTED)
+        c.setFont(FONT, 8)
+        c.drawCentredString(cx, _y(card_top + 89), it["line1"])
+        c.drawCentredString(cx, _y(card_top + 99), it["line2"])
+
+
 def _fmt_date(d: date) -> str:
     return f"{d:%B} {d.day}, {d.year}"
 
@@ -150,36 +181,15 @@ def build_summary_pdf(df: pd.DataFrame, profile, project_name: str,
 
     # Four category cards
     _section(c, 214, "Open items by age")
-    gap = 12
-    card_w = (CONTENT_W - 3 * gap) / 4
-    card_top, card_h, band_h = 232, 118, 10
-    for i, cat in enumerate(cats):
-        x = MARGIN + i * (card_w + gap)
-        c.setStrokeColor(LIGHT_RULE)
-        c.setLineWidth(0.75)
-        c.setFillColor(white)
-        c.rect(x, _y(card_top + card_h), card_w, card_h, stroke=1, fill=1)
-        if cat["colour"]:
-            c.setFillColor(HexColor(cat["colour"]))
-            c.rect(x, _y(card_top + band_h), card_w, band_h, stroke=0, fill=1)
-        else:
-            c.setStrokeColor(LIGHT_RULE)
-            c.line(x, _y(card_top + band_h), x + card_w, _y(card_top + band_h))
-        c.setFillColor(TT_GRAY)
-        c.setFont(FONT_BOLD, 34)
-        c.drawCentredString(x + card_w / 2, _y(card_top + 62), str(cat["count"]))
-        c.setFont(FONT_BOLD, 10)
-        c.drawCentredString(x + card_w / 2, _y(card_top + 84), cat["label"])
-        pct = f"{cat['count'] / n_open:.0%} of open items" if n_open else "—"
-        c.setFillColor(MUTED)
-        c.setFont(FONT, 8)
-        c.drawCentredString(x + card_w / 2, _y(card_top + 99), pct)
-        c.drawCentredString(x + card_w / 2, _y(card_top + 110),
-                            "No highlight" if not cat["colour"] else f"{cat['swatch']} in log")
+    _cards(c, 232, [{
+        "count": cat["count"], "label": cat["label"], "colour": cat["colour"],
+        "line1": f"{cat['count'] / n_open:.0%} of open items" if n_open else "—",
+        "line2": "No highlight" if not cat["colour"] else f"{cat['swatch']} in log",
+    } for cat in cats])
 
     # Distribution bar
-    bar_top, bar_h = 400, 16
-    _section(c, 384, "Distribution of open items")
+    bar_top, bar_h = 384, 16
+    _section(c, 368, "Distribution of open items")
     c.setStrokeColor(LIGHT_RULE)
     c.setLineWidth(0.75)
     dated_total = sum(cat["count"] for cat in cats)
@@ -199,37 +209,27 @@ def build_summary_pdf(df: pd.DataFrame, profile, project_name: str,
     else:
         c.rect(MARGIN, _y(bar_top + bar_h), CONTENT_W, bar_h, stroke=1, fill=0)
 
-    # Recently closed line (cumulative windows)
-    _section(c, 452, "Recently closed items")
-    line_top = 478
-    c.setFillColor(TT_GRAY)
-    c.setFont(FONT, 10.5)
-    c.drawString(MARGIN, _y(line_top), "Closed in the last")
-    x = MARGIN + 104
-    for w in CLOSED_WINDOWS:
-        c.setFont(FONT_BOLD, 16)
-        c.setFillColor(TT_GRAY)
-        num = str(s["closed_recent"][w])
-        c.drawString(x, _y(line_top + 1), num)
-        nx = x + c.stringWidth(num, FONT_BOLD, 16) + 6
-        c.setFont(FONT, 10.5)
-        c.setFillColor(MUTED)
-        c.drawString(nx, _y(line_top), f"{w} days")
-        x = nx + c.stringWidth(f"{w} days", FONT, 10.5) + 26
-        if w != CLOSED_WINDOWS[-1]:
-            c.setStrokeColor(LIGHT_RULE)
-            c.setLineWidth(0.75)
-            c.line(x - 13, _y(line_top + 4), x - 13, _y(line_top - 12))
+    # Recently closed cards (cumulative windows) + items closed without a date
+    _section(c, 432, "Recently closed items")
+    n_closed = s["closed"]
+    pct = lambda k: f"{k / n_closed:.0%} of closed items" if n_closed else "—"
+    closed_cards = [{
+        "count": s["closed_recent"][w], "label": f"Last {w} days", "colour": colour,
+        "line1": pct(s["closed_recent"][w]),
+        "line2": f"Closed since {_short_date(s['ref_date'] - timedelta(days=w))}",
+    } for w, colour in zip(CLOSED_WINDOWS, CLOSED_COLOURS)]
+    closed_cards.append({
+        "count": s["closed_undated"], "label": "No Date Closed", "colour": None,
+        "line1": pct(s["closed_undated"]), "line2": "Not counted in windows",
+    })
+    _cards(c, 450, closed_cards)
     c.setFont(FONT, 8)
     c.setFillColor(MUTED)
-    sub = "Counts are cumulative (the 60-day figure includes the last 30 days), based on Date Closed."
-    if s["closed_undated"]:
-        sub += f" {s['closed_undated']} closed item(s) have no Date Closed and are not counted."
-    for i, line in enumerate(_wrap(c, sub, FONT, 8, CONTENT_W)):
-        c.drawString(MARGIN, _y(line_top + 18 + i * 11), line)
+    c.drawString(MARGIN, _y(568), "Counts are cumulative (the 60-day figure includes the last 30 days) "
+                 "and use each closed item's Date Closed.")
 
     # Notes
-    y = 536
+    y = 596
     _section(c, y, "Notes")
     notes = [
         f"Ages are counted from each item's Observation Date to the date of distribution "
