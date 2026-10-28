@@ -6,12 +6,99 @@ headed "Photographs:". All edits are returned as a new PDF byte string.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from pathlib import Path
 import re
 from typing import Iterable
 
 import fitz
 
 ZERO_WIDTH = "\u200b\u200c\u200d\ufeff"
+
+# --- Caption font: Arial -----------------------------------------------------------
+# Arial is licensed by Microsoft and isn't installed on Streamlit Cloud, so the engine
+# looks for it in this order and reports which font was used:
+#   1. assets/fonts/Arial.ttf (add it to the repo if TT's font licence allows)
+#   2. Arial installed on the computer running the app (Windows / macOS / Linux)
+#   3. the Arial embedded in the uploaded report (TT reports use ArialMT), if it has
+#      every character the captions need and its letters map correctly
+#   4. Liberation Sans (bundled, SIL OFL): an Arial look-alike with identical widths
+FONT_DIR = Path(__file__).resolve().parent / "assets" / "fonts"
+_ARIAL_FILES = (
+    FONT_DIR / "Arial.ttf", FONT_DIR / "arial.ttf",
+    Path("C:/Windows/Fonts/arial.ttf"),
+    Path("/Library/Fonts/Arial.ttf"), Path("/System/Library/Fonts/Supplemental/Arial.ttf"),
+    Path("/usr/share/fonts/truetype/msttcorefonts/Arial.ttf"),
+    Path("/usr/share/fonts/truetype/msttcorefonts/arial.ttf"),
+)
+_ARIAL_METRIC_FILE = FONT_DIR / "LiberationSans-Regular.ttf"
+_ARIAL_NAME = re.compile(r"arial", re.I)
+_NOT_REGULAR = re.compile(r"bold|italic|oblique|black|narrow|light", re.I)
+_PDF_FONT_NAME = "TTArial"
+
+
+@dataclass
+class CaptionFont:
+    buffer: bytes | None   # None = PDF built-in Helvetica (last resort)
+    label: str             # e.g. "Arial" or "Liberation Sans (Arial look-alike)"
+    is_arial: bool
+
+    @property
+    def pdf_name(self) -> str:
+        return _PDF_FONT_NAME if self.buffer else "helv"
+
+
+def _font_covers(font: fitz.Font, chars: set[str]) -> bool:
+    return all(font.has_glyph(ord(c)) for c in chars)
+
+
+def _embedded_arial(doc: fitz.Document, chars: set[str]) -> bytes | None:
+    """Regular-weight Arial embedded in the report, if complete and correctly mapped.
+
+    Embedded fonts are usually subsets, so every caption character must be present.
+    Each character's width is also compared with Liberation Sans (same widths as
+    Arial) so a subset whose characters are mapped to the wrong letters is rejected.
+    """
+    if not _ARIAL_METRIC_FILE.exists():
+        return None
+    reference = fitz.Font(fontfile=str(_ARIAL_METRIC_FILE))
+    tried: set[int] = set()
+    for page in doc:
+        for xref, ext, _type, basefont, *_ in page.get_fonts(full=True):
+            name = basefont.split("+")[-1]
+            if xref in tried or not _ARIAL_NAME.search(name) or _NOT_REGULAR.search(name):
+                continue
+            tried.add(xref)
+            try:
+                _n, ext, _t, buffer = doc.extract_font(xref)
+                if not buffer or ext in ("n/a", ""):
+                    continue
+                font = fitz.Font(fontbuffer=buffer)
+            except Exception:  # noqa: BLE001 - unusable embedded font, try the next one
+                continue
+            if _font_covers(font, chars) and all(
+                abs(font.glyph_advance(ord(c)) - reference.glyph_advance(ord(c))) < 0.005 for c in chars
+            ):
+                return buffer
+    return None
+
+
+def resolve_caption_font(doc: fitz.Document, texts: Iterable[str]) -> CaptionFont:
+    """Pick the caption font (Arial whenever possible) for this report's captions."""
+    chars = {c for text in texts for c in text}
+    for path in _ARIAL_FILES:
+        try:
+            if path.exists():
+                buffer = path.read_bytes()
+                if _font_covers(fitz.Font(fontbuffer=buffer), chars):
+                    return CaptionFont(buffer, "Arial", True)
+        except Exception:  # noqa: BLE001
+            continue
+    embedded = _embedded_arial(doc, chars)
+    if embedded:
+        return CaptionFont(embedded, "Arial (embedded in the report)", True)
+    if _ARIAL_METRIC_FILE.exists():
+        return CaptionFont(_ARIAL_METRIC_FILE.read_bytes(), "Liberation Sans (Arial look-alike)", False)
+    return CaptionFont(None, "Helvetica", False)
 
 
 @dataclass
@@ -228,15 +315,20 @@ def _existing_caption_without_prefix(caption: str) -> str:
     return re.sub(r"^\d+\.(?:NCR|GO)\.\d+-(?:PHOTO\s+)?\d+\s*:\s*", "", caption, flags=re.I)
 
 
-def _fit_font_size(text: str, rect: fitz.Rect, max_size: float, min_size: float) -> float | None:
+def _fit_font_size(text: str, rect: fitz.Rect, max_size: float, min_size: float,
+                   font: CaptionFont | None = None) -> float | None:
     """Find a fitting font size without drawing on the source page."""
     test_doc = fitz.open()
     test_page = test_doc.new_page(width=max(rect.width, 1), height=max(rect.height, 1))
+    fontname = "helv"
+    if font is not None and font.buffer:
+        test_page.insert_font(fontname=font.pdf_name, fontbuffer=font.buffer)
+        fontname = font.pdf_name
     local_rect = fitz.Rect(0, 0, rect.width, rect.height)
     size = max_size
     while size >= min_size - 1e-6:
         remaining = test_page.insert_textbox(
-            local_rect, text, fontname="helv", fontsize=size,
+            local_rect, text, fontname=fontname, fontsize=size,
             lineheight=1.0, align=0, overlay=True,
         )
         if remaining >= -0.01:
@@ -254,9 +346,17 @@ def apply_captions(
     *,
     max_font_size: float = 10.5,
     min_font_size: float = 5.5,
+    font: CaptionFont | None = None,
 ) -> tuple[bytes, list[str]]:
-    """Apply captions to photo-only locations and return (PDF bytes, warnings)."""
+    """Apply captions to photo-only locations and return (PDF bytes, warnings).
+
+    Captions are set in Arial when available (see resolve_caption_font); pass `font`
+    to reuse a font already resolved with caption_font_for().
+    """
     doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+    jobs = list(jobs)
+    if font is None:
+        font = resolve_caption_font(doc, caption_texts(jobs, report_number))
     warnings: list[str] = []
     candidates = []
     cannot_fit: list[CaptionJob] = []
@@ -278,7 +378,7 @@ def apply_captions(
             continue
 
         box = fitz.Rect(job.caption_rect)
-        fitting_size = _fit_font_size(caption_text, box, max_font_size, min_font_size)
+        fitting_size = _fit_font_size(caption_text, box, max_font_size, min_font_size, font)
         if fitting_size is None:
             cannot_fit.append(job)
             continue
@@ -307,28 +407,62 @@ def apply_captions(
     pages_with_redactions: set[int] = set()
     for job, caption_text, box, font_size in prepared:
         page = doc[job.page_index]
+        photo_bottom = fitz.Rect(job.image_rect).y1
         for old in job.old_text_rects:
             rect = fitz.Rect(old)
             rect.x0 = max(0, rect.x0 - 0.6)
-            rect.y0 = max(0, rect.y0 - 0.5)
+            rect.y0 = max(0, rect.y0 - 0.5, photo_bottom)  # never paint over the photo itself
             rect.x1 = min(page.rect.width, rect.x1 + 0.6)
             rect.y1 = min(page.rect.height, rect.y1 + 0.5)
-            page.add_redact_annot(rect, fill=(1, 1, 1), cross_out=False)
+            # No fill: removing the old text is enough, and a white box would clip
+            # the bottom edge of the photo when the old caption sits close to it.
+            page.add_redact_annot(rect, fill=None, cross_out=False)
             pages_with_redactions.add(job.page_index)
 
     # Remove only old caption text; leave images and vector artwork untouched.
     for page_index in pages_with_redactions:
         doc[page_index].apply_redactions(images=0, graphics=0, text=0)
 
+    fonts_added: set[int] = set()
     for job, caption_text, box, font_size in prepared:
         page = doc[job.page_index]
+        if font.buffer and job.page_index not in fonts_added:
+            page.insert_font(fontname=font.pdf_name, fontbuffer=font.buffer)
+            fonts_added.add(job.page_index)
         remaining = page.insert_textbox(
-            box, caption_text, fontname="helv", fontsize=font_size,
+            box, caption_text, fontname=font.pdf_name, fontsize=font_size,
             lineheight=1.0, align=0, color=(0.18, 0.18, 0.18), overlay=True,
         )
         if remaining < -0.01:
             warnings.append(f"Page {job.page_number}, photo {job.photo_number}: unexpected text-fit issue during export.")
 
+    if fonts_added:
+        try:
+            doc.subset_fonts()   # keep only the caption characters, so the PDF stays small
+        except Exception:  # noqa: BLE001 - subsetting is a size optimisation only
+            pass
     output = doc.tobytes(garbage=4, deflate=True)
     doc.close()
     return output, warnings
+
+
+def caption_texts(jobs: Iterable[CaptionJob], report_number: str) -> list[str]:
+    """The caption strings that apply_captions would write (for font checks)."""
+    texts = []
+    for job in jobs:
+        if job.observation_type in {"NCR", "GO"} and job.observation_number.strip() and job.caption.strip():
+            try:
+                texts.append(format_caption(report_number, job.observation_type, job.observation_number,
+                                            job.photo_number, _existing_caption_without_prefix(job.caption)))
+            except ValueError:
+                pass
+    return texts
+
+
+def caption_font_for(pdf_bytes: bytes, jobs: Iterable[CaptionJob], report_number: str) -> CaptionFont:
+    """Resolve the caption font for a report without editing it."""
+    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+    try:
+        return resolve_caption_font(doc, caption_texts(jobs, report_number))
+    finally:
+        doc.close()
