@@ -1,0 +1,115 @@
+import unittest
+from unittest.mock import patch
+
+import fitz
+
+from caption_engine import (
+    CaptionJob, _existing_caption_without_prefix, analyze_pdf, apply_captions, format_caption, parse_observation,
+)
+
+
+def make_sample_pdf():
+    doc = fitz.open()
+    detail = doc.new_page(width=595, height=842)
+    detail.insert_text((30, 100), "Special Inspection Report #42")
+    detail.insert_text((30, 140), "E. Non-Conformance Observation 42.NC.3")
+    photos = doc.new_page(width=595, height=842)
+    photos.insert_text((30, 90), "Photographs:")
+    pix = fitz.Pixmap(fitz.csRGB, fitz.IRect(0, 0, 640, 480), 0)
+    pix.clear_with(0xD0D0D0)
+    photos.insert_image(fitz.Rect(40, 120, 300, 315), pixmap=pix)
+    photos.insert_text((40, 328), "Existing condition caption", fontsize=10.5)
+    return doc.tobytes()
+
+
+class CaptionEngineTests(unittest.TestCase):
+    def test_format_caption_uses_requested_prefix(self):
+        self.assertEqual(
+            format_caption("65", "NCR", "2", 3, "Thermal shim missing"),
+            "65.NCR.2-3: Thermal shim missing",
+        )
+        self.assertEqual(
+            format_caption("65", "GO", "1", 1, "Work in progress"),
+            "65.GO.1-1: Work in progress",
+        )
+
+    def test_existing_caption_removes_new_or_legacy_generated_prefix(self):
+        self.assertEqual(
+            _existing_caption_without_prefix("65.NCR.2-3: Thermal shim missing"),
+            "Thermal shim missing",
+        )
+        self.assertEqual(
+            _existing_caption_without_prefix("65.NCR.2-PHOTO 3: Thermal shim missing"),
+            "Thermal shim missing",
+        )
+
+    def test_parse_observation_detail_headings(self):
+        self.assertEqual(parse_observation("E. Non-Conformance Observation 65.NC.1"), ("NCR", "1"))
+        self.assertEqual(parse_observation("F. General Observation # 1"), ("GO", "1"))
+        self.assertIsNone(parse_observation("Non-conformance Observations:"))
+
+    def test_all_generated_captions_use_the_smallest_required_font_size(self):
+        source_doc = fitz.open()
+        source_doc.new_page(width=595, height=842)
+        source = source_doc.tobytes()
+        source_doc.close()
+        jobs = [
+            CaptionJob(0, 1, "NCR", "1", "Short caption", (40, 100, 250, 200), (40, 205, 280, 235)),
+            CaptionJob(0, 2, "NCR", "1", "Longer caption needing a smaller size", (300, 100, 500, 200), (300, 205, 560, 235)),
+        ]
+
+        with patch("caption_engine._fit_font_size", side_effect=[10.5, 8.0]):
+            output, warnings = apply_captions(source, jobs, "65")
+
+        result = fitz.open(stream=output, filetype="pdf")
+        sizes = {
+            round(span["size"], 2)
+            for block in result[0].get_text("dict")["blocks"]
+            for line in block.get("lines", [])
+            for span in line.get("spans", [])
+        }
+        result.close()
+        self.assertEqual(sizes, {8.0})
+        self.assertTrue(any("for all 2 generated photo captions" in warning for warning in warnings))
+
+    def test_unfit_caption_prevents_partial_mixed_size_replacements(self):
+        source_doc = fitz.open()
+        source_doc.new_page(width=595, height=842)
+        source = source_doc.tobytes()
+        source_doc.close()
+        jobs = [
+            CaptionJob(0, 1, "NCR", "1", "Short caption", (40, 100, 250, 200), (40, 205, 280, 235)),
+            CaptionJob(0, 2, "NCR", "1", "Caption too large", (300, 100, 500, 200), (300, 205, 560, 235)),
+        ]
+
+        with patch("caption_engine._fit_font_size", side_effect=[10.5, None]):
+            output, warnings = apply_captions(source, jobs, "65")
+
+        result = fitz.open(stream=output, filetype="pdf")
+        text = result[0].get_text()
+        result.close()
+        self.assertNotIn("65.NCR.1-1", text)
+        self.assertNotIn("65.NCR.1-2", text)
+        self.assertTrue(any("no generated captions were applied" in warning for warning in warnings))
+
+    def test_detect_and_apply_caption_only_to_photo_page(self):
+        source = make_sample_pdf()
+        report_no, jobs, notes = analyze_pdf(source)
+        self.assertEqual(report_no, "42")
+        self.assertEqual(len(jobs), 1)
+        self.assertEqual(jobs[0].observation_type, "NCR")
+        self.assertEqual(jobs[0].observation_number, "3")
+        self.assertEqual(jobs[0].caption, "Existing condition caption")
+
+        output, warnings = apply_captions(source, jobs, report_no)
+        self.assertFalse(warnings)
+        result = fitz.open(stream=output, filetype="pdf")
+        self.assertEqual(len(result), 2)
+        self.assertIn("42.NCR.3-1: Existing condition caption", result[1].get_text())
+        self.assertNotIn("42.NCR.3-1", result[0].get_text())
+        self.assertEqual(len(result[1].get_images(full=True)), 1)
+        result.close()
+
+
+if __name__ == "__main__":
+    unittest.main()
