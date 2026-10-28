@@ -1,11 +1,26 @@
-[README.md](https://github.com/user-attachments/files/33579119/README.md)
-# TT NCR Log Generator
+[README.md](https://github.com/user-attachments/files/34092250/README.md)
+# Site Visit Post-Processing Tools
 
-A self-contained web app that converts a PlanRadar Non-Conformance /
-Special-Inspections CSV export into the standard Thornton Tomasetti Excel log.
-The template, TT logo, field mapping, Status highlighting, and column
-centering are all built in — the user only uploads a CSV and downloads the
-finished workbook.
+A Thornton Tomasetti web app for finishing PlanRadar site visit outputs. After the
+title, the app asks **What would you like to do?** and runs one of two tools:
+
+| Tool | Upload | Download |
+|---|---|---|
+| **Generate report captions** | Post-processed site visit report (PDF) | Captioned copy of the PDF |
+| **Generate an NCR log** | PlanRadar non-conformance CSV export | Formatted TT Excel log (+ summary PDF for Time Sensitive logs) |
+
+## Generate report captions
+
+- Edits only pages headed **Photographs:**; every other page is left as is
+- Links each photo to the observation on the preceding detail page (NCR or GO)
+- Caption format: `REPORT.NCR.OBS-n: existing caption` (or `GO` for general observations), where `n` is the photo number
+- Captions are left-aligned under each photo; if any caption needs a smaller font to clear the next photo row, every caption uses that same size
+- Each photo can be reviewed (type, observation number, caption text) before export
+- The original PDF is never overwritten
+
+Engine: `caption_engine.py` (PyMuPDF). Tests: `tests/test_caption_engine.py`.
+
+## Generate an NCR log
 
 ## What it does automatically
 
@@ -22,13 +37,16 @@ finished workbook.
 
 ```
 ttfe_ncr_webapp/
-├── app.py            # Streamlit UI (upload → validate → preview → download)
-├── engine.py         # reusable import logic + fixed mapping (no UI)
+├── app.py            # Streamlit UI: tool choice, then captions or NCR log
+├── caption_engine.py # photo-caption detection and PDF editing (no UI)
+├── engine.py         # NCR log import logic + fixed mapping (no UI)
 ├── summary_pdf.py    # Time Sensitive one-page summary PDF (reportlab)
 ├── requirements.txt
 ├── assets/
 │   ├── TTFE_Template.xlsx
 │   └── tt_logo.png
+├── tests/
+│   └── test_caption_engine.py
 └── README.md
 ```
 
