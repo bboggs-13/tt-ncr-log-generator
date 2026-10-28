@@ -3,6 +3,7 @@ from unittest.mock import patch
 
 import fitz
 
+import caption_engine
 from caption_engine import (
     CaptionJob, _existing_caption_without_prefix, analyze_pdf, apply_captions, format_caption, parse_observation,
 )
@@ -109,6 +110,73 @@ class CaptionEngineTests(unittest.TestCase):
         self.assertNotIn("42.NCR.3-1", result[0].get_text())
         self.assertEqual(len(result[1].get_images(full=True)), 1)
         result.close()
+
+
+
+def make_arial_report(identity_encoded: bool):
+    """Report whose text uses an Arial-width font labelled ArialMT, like TT reports."""
+    doc = fitz.open()
+    for _ in range(2):
+        doc.new_page(width=595, height=842)
+    font_file = str(caption_engine._ARIAL_METRIC_FILE)
+    for page in doc:
+        page.insert_font(fontname="F1", fontfile=font_file, set_simple=not identity_encoded)
+    doc[0].insert_text((30, 100), "Special Inspection Report #42", fontname="F1")
+    doc[0].insert_text((30, 140), "E. Non-Conformance Observation 42.NC.3", fontname="F1")
+    doc[1].insert_text((30, 90), "Photographs:", fontname="F1")
+    pix = fitz.Pixmap(fitz.csRGB, fitz.IRect(0, 0, 640, 480), 0)
+    pix.clear_with(0xD0D0D0)
+    doc[1].insert_image(fitz.Rect(40, 120, 300, 315), pixmap=pix)
+    doc[1].insert_text((40, 328), "Existing condition caption", fontsize=10.5, fontname="F1")
+    if identity_encoded:
+        doc.subset_fonts()  # PDF tools embed Arial as a subset, which drops the letter map
+    for xref in {f[0] for page in doc for f in page.get_fonts(full=True)}:
+        doc.xref_set_key(xref, "BaseFont", "/ABCDEF+ArialMT")
+    return doc.tobytes()
+
+
+class CaptionFontTests(unittest.TestCase):
+    def setUp(self):
+        # Pretend no Arial is installed and none was added to the repo.
+        self._files = caption_engine._ARIAL_FILES
+        caption_engine._ARIAL_FILES = ()
+
+    def tearDown(self):
+        caption_engine._ARIAL_FILES = self._files
+
+    def _font_for(self, source):
+        report_no, jobs, _ = analyze_pdf(source)
+        return caption_engine.caption_font_for(source, jobs, report_no)
+
+    def test_falls_back_to_arial_width_liberation_sans(self):
+        font = self._font_for(make_sample_pdf())
+        self.assertFalse(font.is_arial)
+        self.assertIn("Liberation Sans", font.label)
+
+    def test_uses_arial_embedded_in_the_report(self):
+        font = self._font_for(make_arial_report(identity_encoded=False))
+        self.assertTrue(font.is_arial)
+        self.assertEqual(font.label, "Arial (embedded in the report)")
+
+    def test_rejects_embedded_font_that_cannot_be_mapped_back_to_letters(self):
+        font = self._font_for(make_arial_report(identity_encoded=True))
+        self.assertFalse(font.is_arial)
+
+    def test_captions_are_written_in_the_chosen_font_without_clipping_the_photo(self):
+        source = make_sample_pdf()
+        report_no, jobs, _ = analyze_pdf(source)
+        output, _ = apply_captions(source, jobs, report_no)
+        page = fitz.open(stream=output, filetype="pdf")[1]
+        fonts = {
+            span["font"]
+            for block in page.get_text("dict")["blocks"]
+            for line in block.get("lines", [])
+            for span in line["spans"]
+            if span["text"].startswith("42.NCR.3-1")
+        }
+        self.assertEqual(fonts, {"LiberationSans"})
+        photo_edge = page.get_pixmap(clip=fitz.Rect(100, 313, 101, 315), matrix=fitz.Matrix(4, 4))
+        self.assertLess(photo_edge.pixel(1, 1)[0], 235)  # still photo-gray, not painted white
 
 
 if __name__ == "__main__":
