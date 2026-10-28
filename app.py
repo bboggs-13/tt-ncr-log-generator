@@ -342,7 +342,7 @@ def _invalidate_captions():
 def render_captions():
     """Caption tool: post-processed report PDF → captioned PDF copy."""
     import hashlib
-    from caption_engine import CaptionJob, analyze_pdf, apply_captions, format_caption
+    from caption_engine import CaptionJob, analyze_pdf, apply_captions, caption_font_for, format_caption
 
     ss = st.session_state
     field_label(
@@ -427,7 +427,8 @@ def render_captions():
             st.error("Enter the report number before exporting.")
         else:
             with st.spinner("Applying captions to the photo pages\u2026"):
-                ss.cap_pdf, ss.cap_warnings = apply_captions(pdf_bytes, jobs, report_no)
+                ss.cap_font = caption_font_for(pdf_bytes, jobs, report_no)
+                ss.cap_pdf, ss.cap_warnings = apply_captions(pdf_bytes, jobs, report_no, font=ss.cap_font)
 
     if ss.get("cap_pdf"):
         if ss.cap_warnings:
@@ -436,6 +437,13 @@ def render_captions():
                     st.warning(w)
         else:
             st.success("Captioned PDF is ready. No layout warnings were reported.")
+        _font = ss.get("cap_font")
+        if _font is not None and _font.is_arial:
+            st.caption(f"Caption font: {_font.label}")
+        elif _font is not None:
+            st.info(f"Arial wasn't available, so captions use {_font.label}, which has the same letter "
+                    "widths and a near-identical look. To use Arial itself, add Arial.ttf to "
+                    "assets/fonts in the repo (check TT's font licence first).")
         st.download_button(
             "\u2b07 Download captioned PDF",
             data=ss.cap_pdf,
