@@ -179,5 +179,42 @@ class CaptionFontTests(unittest.TestCase):
         self.assertLess(photo_edge.pixel(1, 1)[0], 235)  # still photo-gray, not painted white
 
 
+class PageNumberTests(unittest.TestCase):
+    def _report(self, size=10.0):
+        doc = fitz.open(stream=make_sample_pdf(), filetype="pdf")
+        total = doc.page_count
+        for i, page in enumerate(doc):
+            text = f"Page {i + 1} of {total}"
+            x = 567.3 - fitz.get_text_length(text, fontname="helv", fontsize=size)
+            page.insert_text((28.5, 819.0), "IMMEDIATELY BY EMAIL OR TELEPHONE.", fontsize=6)
+            page.insert_text((x, 831.3), text, fontname="helv", fontsize=size)
+        return doc.tobytes()
+
+    def _page_numbers(self, pdf):
+        out = []
+        for page in fitz.open(stream=pdf, filetype="pdf"):
+            for span in page.get_texttrace():
+                text = "".join(chr(c[0]) for c in span["chars"])
+                if text.startswith("Page "):
+                    out.append((text, span["size"], round(span["bbox"][2], 1)))
+        return out
+
+    def test_page_numbers_are_set_to_8_pt_and_stay_right_aligned(self):
+        source = self._report()
+        report_no, jobs, _ = analyze_pdf(source)
+        output, _ = apply_captions(source, jobs, report_no)
+        numbers = self._page_numbers(output)
+        self.assertEqual([n[0] for n in numbers], ["Page 1 of 2", "Page 2 of 2"])  # old text removed, not doubled
+        self.assertEqual({n[1] for n in numbers}, {8.0})
+        self.assertEqual({n[2] for n in numbers}, {567.3})
+        self.assertIn("IMMEDIATELY BY EMAIL OR TELEPHONE.", fitz.open(stream=output, filetype="pdf")[0].get_text())
+
+    def test_page_numbers_can_be_left_unchanged(self):
+        source = self._report()
+        report_no, jobs, _ = analyze_pdf(source)
+        output, _ = apply_captions(source, jobs, report_no, page_number_size=None)
+        self.assertEqual({n[1] for n in self._page_numbers(output)}, {10.0})
+
+
 if __name__ == "__main__":
     unittest.main()
