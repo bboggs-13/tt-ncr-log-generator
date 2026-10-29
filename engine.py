@@ -178,10 +178,11 @@ PROFILES = {
         },
         required_columns=["Report #", "Non-Conformance #", "Observation Date", "Type", "Status"],
         center_columns=[1, 2, 3, 4, 7, 9, 10], status_col=7, last_col=10,
-        type_highlight=True, status_colors=False,
+        type_highlight=True, status_colors=False, filter_open=True,
         legend_cols=("D", "E"),
         ui_note=("Rows are shaded by NCR Type in pastel colours: TR-1 green · TR-8 terracotta · "
-                 "QA/QC dark blue. Other or blank types are not shaded."),
+                 "QA/QC dark blue. Other or blank types are not shaded. The log opens filtered to "
+                 "open items — closed items are still in the log; use the Status filter to show them."),
     ),
     "regular": Profile(
         key="regular",
