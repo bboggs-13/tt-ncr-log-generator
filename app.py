@@ -13,7 +13,7 @@ text (#76767B). Theme base lives in .streamlit/config.toml.
 Run locally:   streamlit run app.py
 """
 from pathlib import Path
-_CAPTION_ENGINE_VERSION = "2026-10-29.3"   # must match caption_engine.ENGINE_VERSION
+_CAPTION_ENGINE_VERSION = "2026-10-29.4"   # must match caption_engine.ENGINE_VERSION
 
 import streamlit as st
 from PIL import Image
@@ -347,7 +347,10 @@ def render_captions():
     import caption_engine as _ce
     if getattr(_ce, "ENGINE_VERSION", None) != _CAPTION_ENGINE_VERSION:
         _ce = importlib.reload(_ce)   # Streamlit can keep an old copy in memory after a code update
-    from caption_engine import CaptionJob, analyze_pdf, apply_captions, caption_font_for, format_caption
+    from caption_engine import (
+        MAX_SIGNATURES, CaptionJob, analyze_pdf, apply_captions, apply_signatures,
+        caption_font_for, find_signature_box, format_caption,
+    )
 
     ss = st.session_state
     field_label(
@@ -424,18 +427,46 @@ def render_captions():
             job.observation_number = obs
             job.caption = caption
 
-    st.subheader("2. Generate captioned PDF")
+    st.subheader("2. Add signatures (optional)")
+    if ss.get("cap_sig_fp") != fingerprint:
+        ss.cap_sig_fp, ss.cap_sig_box = fingerprint, find_signature_box(pdf_bytes)
+    sig_box = ss.cap_sig_box
+    field_label(
+        _PAPERCLIP_B64, "Signature images (up to 2)",
+        tip="Upload PNG or JPG signature images. Each is trimmed, its white or paper background is "
+            "removed, and it is scaled to fit inside the \u201cSigned:\u201d box without touching the "
+            "Date box. Two signatures are placed side by side.",
+    )
+    sig_files = st.file_uploader("Signature images (up to 2)", type=["png", "jpg", "jpeg"],
+                                 accept_multiple_files=True, label_visibility="collapsed",
+                                 key=f"cap_sigs_{k}", on_change=_invalidate_captions) or []
+    if sig_box is None:
+        st.caption("No \u201cSigned:\u201d box was found in this report, so signatures can\u2019t be added.")
+    elif not sig_files:
+        st.caption(f"Signature box found on page {sig_box.page_number}. Leave this empty to export unsigned.")
+    if len(sig_files) > MAX_SIGNATURES:
+        st.error(f"Upload no more than {MAX_SIGNATURES} signature images \u2014 remove "
+                 f"{len(sig_files) - MAX_SIGNATURES} to continue.")
+
+    st.subheader("3. Generate captioned PDF")
     if st.button("Apply captions", type="primary",
                  help="Captions are left-aligned under each photo. If any caption needs a smaller "
                       "font to clear the next photo row, every caption uses that same size."):
         if not report_no:
             st.error("Enter the report number before exporting.")
+        elif len(sig_files) > MAX_SIGNATURES:
+            pass   # the error above the button already explains this
         else:
             with st.spinner("Applying captions to the photo pages\u2026"):
                 ss.cap_font = caption_font_for(pdf_bytes, jobs, report_no)
                 ss.cap_stats = {}
                 ss.cap_pdf, ss.cap_warnings = apply_captions(pdf_bytes, jobs, report_no, font=ss.cap_font,
                                                              stats=ss.cap_stats)
+                ss.cap_sig_info = None
+                if sig_files and sig_box is not None:
+                    ss.cap_pdf, sig_warnings, ss.cap_sig_info = apply_signatures(
+                        ss.cap_pdf, [f.getvalue() for f in sig_files])
+                    ss.cap_warnings = list(ss.cap_warnings) + sig_warnings
 
     if ss.get("cap_pdf"):
         if ss.cap_warnings:
@@ -452,6 +483,14 @@ def render_captions():
         else:
             st.caption("No \u201cPage X of Y\u201d page numbers were found in this report, so they were left "
                        f"unchanged. Caption prefixes are bold. Engine {_ce.ENGINE_VERSION}")
+        _sig = ss.get("cap_sig_info")
+        if _sig and _sig.get("placed"):
+            import fitz
+            _page = fitz.open(stream=ss.cap_pdf, filetype="pdf")[_sig["page"] - 1]
+            _row = fitz.Rect(_sig["area"]); _row.x0 = 20; _row.x1 = (_sig.get("date_cell") or _row)[2] + 8
+            _row.y0 -= 6; _row.y1 += 6
+            st.image(_page.get_pixmap(clip=_row, matrix=fitz.Matrix(3, 3)).tobytes("png"),
+                     caption=f"{_sig['placed']} signature(s) added on page {_sig['page']}")
         _font = ss.get("cap_font")
         if _font is not None and _font.is_arial:
             st.caption(f"Caption font: {_font.label}")
