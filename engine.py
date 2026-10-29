@@ -17,6 +17,7 @@ from datetime import date, datetime
 from pathlib import Path
 
 import pandas as pd
+from openpyxl.worksheet.filters import CustomFilter, CustomFilters, FilterColumn
 from openpyxl import load_workbook
 from openpyxl.drawing.image import Image as XLImage
 from openpyxl.drawing.spreadsheet_drawing import OneCellAnchor, AnchorMarker
@@ -121,15 +122,16 @@ class Profile:
     age_highlight: bool = False   # Time Sensitive: shade open rows by age of Observation Date
     type_highlight: bool = False  # Project Closeout: shade rows by NCR Type
     status_colors: bool = True    # blue/yellow/green Status-cell colours (off when rows are shaded)
-    filter_open: bool = False     # open the log pre-filtered to non-Closed items
+    filter_open: bool = True      # every log opens pre-filtered to non-Closed items
     legend_cols: tuple = ("E", "F")  # legend: (swatch column, label column)
     ui_note: str = ""             # short explanation shown in the app
 
 
 _AGE_NOTE = ("Open items are shaded across the whole row by days since the Observation Date, "
              "measured from the log's Date Updated: under 30 none · 30–59 yellow · 60–89 orange · "
-             "90+ red. Closed items are not shaded. The log opens filtered to open items — use the "
-             "Status filter to show closed items.")
+             "90+ red. Closed items are not shaded.")
+_FILTER_NOTE = ("The log opens showing open items only. Closed items are still in the log — "
+                "choose Select All in the Status filter to show them.")
 
 # Special Inspections columns (Type and Priority removed)
 _SPECIAL_MAP = {
@@ -156,6 +158,7 @@ PROFILES = {
         template="TTFE_Template.xlsx",
         column_map=_SPECIAL_MAP, required_columns=_SPECIAL_REQ,
         center_columns=_SPECIAL_CENTER, status_col=6, last_col=9,
+        ui_note=_FILTER_NOTE,
     ),
     "special_time": Profile(
         key="special_time",
@@ -165,7 +168,7 @@ PROFILES = {
         center_columns=_SPECIAL_CENTER, status_col=6, last_col=9,
         age_highlight=True, status_colors=False, filter_open=True,
         legend_cols=("F", "G"),  # narrow Status column holds the swatches
-        ui_note=_AGE_NOTE,
+        ui_note=_AGE_NOTE + " " + _FILTER_NOTE,
     ),
     "special_closeout": Profile(
         key="special_closeout",
@@ -181,8 +184,7 @@ PROFILES = {
         type_highlight=True, status_colors=False, filter_open=True,
         legend_cols=("D", "E"),
         ui_note=("Rows are shaded by NCR Type in pastel colours: TR-1 green · TR-8 terracotta · "
-                 "QA/QC dark blue. Other or blank types are not shaded. The log opens filtered to "
-                 "open items — closed items are still in the log; use the Status filter to show them."),
+                 "QA/QC dark blue. Other or blank types are not shaded. " + _FILTER_NOTE),
     ),
     "regular": Profile(
         key="regular",
@@ -190,6 +192,7 @@ PROFILES = {
         template="TTFE_Template_Regular.xlsx",
         column_map=_REGULAR_MAP, required_columns=_REGULAR_REQ,
         center_columns=_REGULAR_CENTER, status_col=7, last_col=9,
+        ui_note=_FILTER_NOTE,
     ),
     "regular_time": Profile(
         key="regular_time",
@@ -199,7 +202,7 @@ PROFILES = {
         center_columns=_REGULAR_CENTER, status_col=7, last_col=9,
         age_highlight=True, status_colors=False, filter_open=True,
         legend_cols=("D", "E"),  # narrow Responsible Party column holds the swatches
-        ui_note=_AGE_NOTE,
+        ui_note=_AGE_NOTE + " " + _FILTER_NOTE,
     ),
 }
 DEFAULT_PROFILE = "special"
@@ -371,24 +374,25 @@ def _apply_type_highlight(ws, profile, n, last_row, last_col_letter):
 
 
 def _apply_open_filter(ws, profile, n, last_row):
-    """Pre-apply the Status filter so only non-Closed items show on open.
+    """Open the log filtered to non-Closed items; returns how many closed rows are hidden.
 
-    Closed rows are hidden by the filter (not deleted) — choosing 'Select All' in the
-    Status dropdown brings them back. Skipped if nothing is closed or everything is.
+    Uses an Excel custom filter "Status does not equal Closed and does not equal Close",
+    so blank / Open / In Progress (or any other status) stay visible, and re-applying the
+    filter in Excel after editing a status hides newly closed items too. Closed rows are
+    hidden, not deleted: Select All in the Status filter brings them back. Applied even
+    when every item is closed, so a download never opens showing closed items.
     """
     letter = get_column_letter(profile.status_col)
-    shown, hidden = [], []
-    for r in range(DATA_START_ROW, last_row + 1):
-        v = ws[f"{letter}{r}"].value
-        text = "" if v is None else str(v)
-        if text.strip().lower() in CLOSED_WORDS:
-            hidden.append(r)
-        elif text not in shown:
-            shown.append(text)
-    if not hidden or len(hidden) == n:
-        return 0
-    ws.auto_filter.add_filter_column(profile.status_col - 1, [t for t in shown if t],
-                                     blank="" in shown)
+    hidden = [
+        r for r in range(DATA_START_ROW, last_row + 1)
+        if str(ws[f"{letter}{r}"].value or "").strip().lower() in CLOSED_WORDS
+    ]
+    ws.auto_filter.filterColumn.append(FilterColumn(
+        colId=profile.status_col - 1,
+        customFilters=CustomFilters(_and=True, customFilter=[
+            CustomFilter(operator="notEqual", val=word.capitalize()) for word in CLOSED_WORDS
+        ]),
+    ))
     for r in hidden:
         ws.row_dimensions[r].hidden = True
     return len(hidden)
@@ -731,7 +735,7 @@ def build_workbook(df: pd.DataFrame, profile: Profile, project_name: str = "134 
         ("Aging reference date", ws["C5"].value.strftime("%Y-%m-%d") if profile.age_highlight else "n/a"),
         ("Template", profile.template),
         ("PlanRadar link column", "Included" if LINK_FIELD in profile.column_map else "Omitted (no PlanRadar access)"),
-        ("Default filter", f"Open items only ({hidden_closed} closed hidden)" if hidden_closed else "None"),
+        ("Default filter", f"Open items only ({hidden_closed} closed hidden)" if profile.filter_open and n else "None"),
         ("Rows imported", n),
         ("Project", project_name),
     ], start=1):
