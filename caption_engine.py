@@ -13,6 +13,7 @@ from typing import Iterable
 import fitz
 
 ZERO_WIDTH = "\u200b\u200c\u200d\ufeff"
+ENGINE_VERSION = "2026-10-29.3"   # shown in the app so you can confirm what's deployed
 
 # --- Caption font: Arial -----------------------------------------------------------
 # Arial is licensed by Microsoft and isn't installed on Streamlit Cloud, so the engine
@@ -30,10 +31,21 @@ _ARIAL_FILES = (
     Path("/usr/share/fonts/truetype/msttcorefonts/Arial.ttf"),
     Path("/usr/share/fonts/truetype/msttcorefonts/arial.ttf"),
 )
+_ARIAL_BOLD_FILES = (
+    FONT_DIR / "Arial Bold.ttf", FONT_DIR / "arialbd.ttf", FONT_DIR / "Arial-Bold.ttf",
+    Path("C:/Windows/Fonts/arialbd.ttf"),
+    Path("/Library/Fonts/Arial Bold.ttf"), Path("/System/Library/Fonts/Supplemental/Arial Bold.ttf"),
+    Path("/usr/share/fonts/truetype/msttcorefonts/Arial_Bold.ttf"),
+    Path("/usr/share/fonts/truetype/msttcorefonts/arialbd.ttf"),
+)
 _ARIAL_METRIC_FILE = FONT_DIR / "LiberationSans-Regular.ttf"
+_ARIAL_BOLD_METRIC_FILE = FONT_DIR / "LiberationSans-Bold.ttf"
 _ARIAL_NAME = re.compile(r"arial", re.I)
 _NOT_REGULAR = re.compile(r"bold|italic|oblique|black|narrow|light", re.I)
+_NOT_PLAIN_BOLD = re.compile(r"italic|oblique|black|narrow|light", re.I)
+_BOLD = re.compile(r"bold", re.I)
 _PDF_FONT_NAME = "TTArial"
+_PDF_BOLD_FONT_NAME = "TTArialBd"
 
 
 @dataclass
@@ -41,31 +53,46 @@ class CaptionFont:
     buffer: bytes | None   # None = PDF built-in Helvetica (last resort)
     label: str             # e.g. "Arial" or "Liberation Sans (Arial look-alike)"
     is_arial: bool
+    bold_buffer: bytes | None = None   # used for the caption prefix; None = Helvetica-Bold
 
     @property
     def pdf_name(self) -> str:
         return _PDF_FONT_NAME if self.buffer else "helv"
+
+    @property
+    def pdf_bold_name(self) -> str:
+        return _PDF_BOLD_FONT_NAME if self.bold_buffer else "hebo"
+
+    def regular(self) -> fitz.Font:
+        return fitz.Font(fontbuffer=self.buffer) if self.buffer else fitz.Font("helv")
+
+    def bold(self) -> fitz.Font:
+        return fitz.Font(fontbuffer=self.bold_buffer) if self.bold_buffer else fitz.Font("hebo")
 
 
 def _font_covers(font: fitz.Font, chars: set[str]) -> bool:
     return all(font.has_glyph(ord(c)) for c in chars)
 
 
-def _embedded_arial(doc: fitz.Document, chars: set[str]) -> bytes | None:
+def _embedded_arial(doc: fitz.Document, chars: set[str], bold: bool = False) -> bytes | None:
     """Regular-weight Arial embedded in the report, if complete and correctly mapped.
 
     Embedded fonts are usually subsets, so every caption character must be present.
     Each character's width is also compared with Liberation Sans (same widths as
     Arial) so a subset whose characters are mapped to the wrong letters is rejected.
     """
-    if not _ARIAL_METRIC_FILE.exists():
+    metric_file = _ARIAL_BOLD_METRIC_FILE if bold else _ARIAL_METRIC_FILE
+    if not metric_file.exists():
         return None
-    reference = fitz.Font(fontfile=str(_ARIAL_METRIC_FILE))
+    reference = fitz.Font(fontfile=str(metric_file))
     tried: set[int] = set()
     for page in doc:
         for xref, ext, _type, basefont, *_ in page.get_fonts(full=True):
             name = basefont.split("+")[-1]
-            if xref in tried or not _ARIAL_NAME.search(name) or _NOT_REGULAR.search(name):
+            wrong_style = (
+                (not _BOLD.search(name) or _NOT_PLAIN_BOLD.search(name)) if bold else _NOT_REGULAR.search(name)
+            )
+            if xref in tried or not _ARIAL_NAME.search(name) or wrong_style:
                 continue
             tried.add(xref)
             try:
@@ -82,23 +109,46 @@ def _embedded_arial(doc: fitz.Document, chars: set[str]) -> bytes | None:
     return None
 
 
-def resolve_caption_font(doc: fitz.Document, texts: Iterable[str]) -> CaptionFont:
-    """Pick the caption font (Arial whenever possible) for this report's captions."""
-    chars = {c for text in texts for c in text}
-    for path in _ARIAL_FILES:
+def _font_file(paths: Iterable[Path], chars: set[str]) -> bytes | None:
+    for path in paths:
         try:
             if path.exists():
                 buffer = path.read_bytes()
                 if _font_covers(fitz.Font(fontbuffer=buffer), chars):
-                    return CaptionFont(buffer, "Arial", True)
+                    return buffer
         except Exception:  # noqa: BLE001
             continue
-    embedded = _embedded_arial(doc, chars)
+    return None
+
+
+def _resolve_style(doc: fitz.Document, chars: set[str], bold: bool) -> tuple[bytes | None, str, bool]:
+    """(font bytes, label, is real Arial) for the regular or bold caption style."""
+    buffer = _font_file(_ARIAL_BOLD_FILES if bold else _ARIAL_FILES, chars)
+    if buffer:
+        return buffer, "Arial", True
+    embedded = _embedded_arial(doc, chars, bold=bold)
     if embedded:
-        return CaptionFont(embedded, "Arial (embedded in the report)", True)
-    if _ARIAL_METRIC_FILE.exists():
-        return CaptionFont(_ARIAL_METRIC_FILE.read_bytes(), "Liberation Sans (Arial look-alike)", False)
-    return CaptionFont(None, "Helvetica", False)
+        return embedded, "Arial (embedded in the report)", True
+    metric = _ARIAL_BOLD_METRIC_FILE if bold else _ARIAL_METRIC_FILE
+    if metric.exists():
+        return metric.read_bytes(), "Liberation Sans (Arial look-alike)", False
+    return None, "Helvetica", False
+
+
+def resolve_caption_font(doc: fitz.Document, texts: Iterable[str]) -> CaptionFont:
+    """Pick the caption fonts (Arial whenever possible): regular text plus a bold prefix."""
+    texts = list(texts)
+    chars = {c for text in texts for c in _split_caption(text)[1]}
+    bold_chars = {c for text in texts for c in _split_caption(text)[0]}
+    buffer, label, is_arial = _resolve_style(doc, chars, bold=False)
+    bold_buffer, _bold_label, _bold_is_arial = _resolve_style(doc, bold_chars or set("0123456789.:-NCRGO"), bold=True)
+    return CaptionFont(buffer, label, is_arial, bold_buffer)
+
+
+def _split_caption(text: str) -> tuple[str, str]:
+    """('65.NCR.1-1:', 'Description') - the prefix is set in bold."""
+    match = re.match(r"^(\d+\.(?:NCR|GO)\.\d+-\d+:)\s*(.*)$", text, re.S)
+    return (match.group(1), match.group(2)) if match else ("", text)
 
 
 @dataclass
@@ -315,34 +365,69 @@ def _existing_caption_without_prefix(caption: str) -> str:
     return re.sub(r"^\d+\.(?:NCR|GO)\.\d+-(?:PHOTO\s+)?\d+\s*:\s*", "", caption, flags=re.I)
 
 
+_LINE_HEIGHT = 1.0   # baseline-to-baseline distance, as a multiple of the font size
+
+
+def _layout_caption(text: str, rect: fitz.Rect, size: float, font: CaptionFont | None,
+                    ) -> list[tuple[float, float, str, bool]] | None:
+    """Word-wrap a caption into `rect`: list of (x, baseline, text, bold), or None if it won't fit.
+
+    The "65.NCR.1-1:" prefix is bold and the description regular, left-aligned.
+    """
+    font = font or CaptionFont(None, "Helvetica", False)
+    regular, bold = font.regular(), font.bold()
+    prefix, description = _split_caption(clean_text(text))
+    words = ([(prefix, True)] if prefix else []) + [(w, False) for w in description.split()]
+    if not words:
+        return []
+    space = regular.text_length(" ", fontsize=size)
+    lines: list[list[tuple[str, bool, float]]] = [[]]
+    line_width = 0.0
+    for word, is_bold in words:
+        width = (bold if is_bold else regular).text_length(word, fontsize=size)
+        if width > rect.width + 0.01:
+            return None   # a single word wider than the caption area
+        needed = width if not lines[-1] else line_width + space + width
+        if lines[-1] and needed > rect.width + 0.01:
+            lines.append([])
+            needed = width
+        lines[-1].append((word, is_bold, needed - width))
+        line_width = needed
+    ascender = max(regular.ascender, bold.ascender)
+    descender = min(regular.descender, bold.descender)
+    first_baseline = rect.y0 + ascender * size
+    last_bottom = first_baseline + (len(lines) - 1) * size * _LINE_HEIGHT - descender * size
+    if last_bottom > rect.y1 + 0.01:
+        return None
+    placed = []
+    for row, line in enumerate(lines):
+        baseline = first_baseline + row * size * _LINE_HEIGHT
+        # Merge neighbouring words of the same weight into one run.
+        for word, is_bold, x in line:
+            if placed and placed[-1][1] == baseline and placed[-1][3] == is_bold:
+                px, pb, ptext, pbold = placed[-1]
+                placed[-1] = (px, pb, f"{ptext} {word}", pbold)
+            else:
+                text_run = word if not placed or placed[-1][1] != baseline else f" {word}"
+                if text_run.startswith(" "):
+                    x -= space
+                placed.append((rect.x0 + x, baseline, text_run, is_bold))
+    return placed
+
+
 def _fit_font_size(text: str, rect: fitz.Rect, max_size: float, min_size: float,
                    font: CaptionFont | None = None) -> float | None:
-    """Find a fitting font size without drawing on the source page."""
-    test_doc = fitz.open()
-    test_page = test_doc.new_page(width=max(rect.width, 1), height=max(rect.height, 1))
-    fontname = "helv"
-    if font is not None and font.buffer:
-        test_page.insert_font(fontname=font.pdf_name, fontbuffer=font.buffer)
-        fontname = font.pdf_name
-    local_rect = fitz.Rect(0, 0, rect.width, rect.height)
+    """Largest size (0.25 pt steps) at which the caption fits its area, else None."""
     size = max_size
     while size >= min_size - 1e-6:
-        remaining = test_page.insert_textbox(
-            local_rect, text, fontname=fontname, fontsize=size,
-            lineheight=1.0, align=0, overlay=True,
-        )
-        if remaining >= -0.01:
-            test_doc.close()
+        if _layout_caption(text, rect, size, font) is not None:
             return size
         size = round(size - 0.25, 2)
-    test_doc.close()
     return None
 
 
 # --- Page numbers -------------------------------------------------------------------
 PAGE_NUMBER_SIZE = 8.0
-_PAGE_NUMBER = re.compile(r"^Page\s+\d+\s+of\s+\d+$", re.I)
-_BASE14 = {"helvetica": "helv", "helvetica-bold": "hebo", "times-roman": "tiro", "courier": "cour"}
 
 
 @dataclass
@@ -351,30 +436,48 @@ class _PageNumber:
     redact_rect: fitz.Rect
     right: float
     baseline: float
+    size: float
     font: str
     color: tuple[float, float, float]
 
 
 def _find_page_numbers(page: fitz.Page) -> list[_PageNumber]:
-    """'Page X of Y' lines on a page (PlanRadar puts one at the bottom right)."""
-    found = []
-    for block in page.get_text("dict").get("blocks", []):
+    """Every "Page X of Y" on a page, found character by character.
+
+    Characters are grouped by baseline, so this works however the PDF splits the text
+    into spans, lines or blocks (and in any PyMuPDF version).
+    """
+    rows: dict[tuple[float, float], list[tuple[str, fitz.Rect, dict]]] = {}
+    for block in page.get_text("rawdict").get("blocks", []):
         for line in block.get("lines", []):
-            spans = [sp for sp in line.get("spans", []) if sp.get("text", "").strip()]
-            text = clean_text("".join(sp.get("text", "") for sp in line.get("spans", [])))
-            if not spans or not _PAGE_NUMBER.match(text):
+            if tuple(round(v, 2) for v in line.get("dir", (1, 0))) != (1.0, 0.0):
+                continue   # horizontal text only
+            for span in line.get("spans", []):
+                for ch in span.get("chars", []):
+                    key = (round(ch["origin"][1] * 2) / 2, round(span["size"], 1))
+                    rows.setdefault(key, []).append((ch["c"], fitz.Rect(ch["bbox"]), span))
+    found = []
+    for (baseline, size), chars in rows.items():
+        chars.sort(key=lambda item: item[1].x0)
+        text, owners = "", []
+        for i, (c, bbox, span) in enumerate(chars):
+            if i and c != " " and text and text[-1] != " " and bbox.x0 - chars[i - 1][1].x1 > size * 0.15:
+                text += " "; owners.append(None)   # visual gap without a space character
+            text += c; owners.append(i)
+        for match in re.finditer(r"Page\s*\d+\s*of\s*\d+", text, re.I):
+            idx = [owners[k] for k in range(match.start(), match.end()) if owners[k] is not None]
+            glyphs = [chars[k] for k in idx if chars[k][0].strip()]
+            if not glyphs:
                 continue
-            first = spans[0]
-            size = first["size"]
-            baseline = first["origin"][1]
-            x0 = min(sp["bbox"][0] for sp in spans)
-            x1 = max(sp["bbox"][2] for sp in spans)
-            # Tight box around the glyphs only, so text just above (the notice) is untouched.
+            span = glyphs[0][2]
+            x0 = min(g[1].x0 for g in glyphs); x1 = max(g[1].x1 for g in glyphs)
             rect = fitz.Rect(x0 - 0.5, baseline - size * 0.8, x1 + 0.5, baseline + size * 0.25)
-            rgb = first.get("color", 0)
+            rgb = span.get("color", 0)
             color = (((rgb >> 16) & 255) / 255, ((rgb >> 8) & 255) / 255, (rgb & 255) / 255)
-            font = _BASE14.get(first.get("font", "").split("+")[-1].lower(), "helv")
-            found.append(_PageNumber(text, rect, x1, baseline, font, color))
+            name = span.get("font", "").split("+")[-1]
+            font = "hebo" if (span.get("flags", 0) & 16 or _BOLD.search(name)) else "helv"
+            label = re.sub(r"\s+", " ", re.sub(r"(?i)page\s*(\d+)\s*of\s*(\d+)", r"Page \1 of \2", match.group(0)))
+            found.append(_PageNumber(label, rect, x1, baseline, size, font, color))
     return found
 
 
@@ -387,12 +490,14 @@ def apply_captions(
     min_font_size: float = 5.5,
     font: CaptionFont | None = None,
     page_number_size: float | None = PAGE_NUMBER_SIZE,
+    stats: dict | None = None,
 ) -> tuple[bytes, list[str]]:
     """Apply captions to photo-only locations and return (PDF bytes, warnings).
 
     Captions are set in Arial when available (see resolve_caption_font); pass `font`
     to reuse a font already resolved with caption_font_for(). Every "Page X of Y"
     is rewritten at `page_number_size` (pass None to leave page numbers alone).
+    If `stats` is a dict it receives page_numbers_found / page_numbers_resized / pages.
     """
     doc = fitz.open(stream=pdf_bytes, filetype="pdf")
     jobs = list(jobs)
@@ -463,7 +568,7 @@ def apply_captions(
     page_numbers: dict[int, list[_PageNumber]] = {}
     if page_number_size:
         for page_index, page in enumerate(doc):
-            numbers = [n for n in _find_page_numbers(page)]
+            numbers = _find_page_numbers(page)
             if numbers:
                 page_numbers[page_index] = numbers
                 for number in numbers:
@@ -477,15 +582,21 @@ def apply_captions(
     fonts_added: set[int] = set()
     for job, caption_text, box, font_size in prepared:
         page = doc[job.page_index]
-        if font.buffer and job.page_index not in fonts_added:
-            page.insert_font(fontname=font.pdf_name, fontbuffer=font.buffer)
+        if job.page_index not in fonts_added:
+            if font.buffer:
+                page.insert_font(fontname=font.pdf_name, fontbuffer=font.buffer)
+            if font.bold_buffer:
+                page.insert_font(fontname=font.pdf_bold_name, fontbuffer=font.bold_buffer)
             fonts_added.add(job.page_index)
-        remaining = page.insert_textbox(
-            box, caption_text, fontname=font.pdf_name, fontsize=font_size,
-            lineheight=1.0, align=0, color=(0.18, 0.18, 0.18), overlay=True,
-        )
-        if remaining < -0.01:
+        runs = _layout_caption(caption_text, box, font_size, font)
+        if runs is None:
             warnings.append(f"Page {job.page_number}, photo {job.photo_number}: unexpected text-fit issue during export.")
+            continue
+        for x, baseline, run_text, is_bold in runs:
+            page.insert_text(
+                (x, baseline), run_text, fontname=font.pdf_bold_name if is_bold else font.pdf_name,
+                fontsize=font_size, color=(0.18, 0.18, 0.18), overlay=True,
+            )
 
     for page_index, numbers in page_numbers.items():
         page = doc[page_index]
@@ -502,7 +613,25 @@ def apply_captions(
         except Exception:  # noqa: BLE001 - subsetting is a size optimisation only
             pass
     output = doc.tobytes(garbage=4, deflate=True)
+    page_total = doc.page_count
     doc.close()
+
+    found = sum(len(v) for v in page_numbers.values())
+    resized = 0
+    if page_number_size:
+        # Check the saved PDF itself: each page number must now be at the new size, once.
+        check = fitz.open(stream=output, filetype="pdf")
+        for page_index, numbers in page_numbers.items():
+            after = _find_page_numbers(check[page_index])
+            for number in numbers:
+                same = [a for a in after if a.text == number.text and abs(a.baseline - number.baseline) < 1.5]
+                if same and all(abs(a.size - page_number_size) < 0.15 for a in same):
+                    resized += 1
+        check.close()
+        if found and resized < found:
+            warnings.append(f"Only {resized} of {found} page numbers could be resized to {page_number_size:g} pt.")
+    if stats is not None:
+        stats.update(page_numbers_found=found, page_numbers_resized=resized, pages=page_total)
     return output, warnings
 
 
