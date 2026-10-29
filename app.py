@@ -13,7 +13,7 @@ text (#76767B). Theme base lives in .streamlit/config.toml.
 Run locally:   streamlit run app.py
 """
 from pathlib import Path
-_CAPTION_ENGINE_VERSION = "2026-10-29.4"   # must match caption_engine.ENGINE_VERSION
+_CAPTION_ENGINE_VERSION = "2026-10-29.5"   # must match caption_engine.ENGINE_VERSION
 
 import streamlit as st
 from PIL import Image
@@ -448,7 +448,31 @@ def render_captions():
         st.error(f"Upload no more than {MAX_SIGNATURES} signature images \u2014 remove "
                  f"{len(sig_files) - MAX_SIGNATURES} to continue.")
 
-    st.subheader("3. Generate captioned PDF")
+    st.subheader("3. Section boxes")
+    import section_boxes as _sb
+    if ss.get("cap_box_fp") != fingerprint:
+        try:
+            _doc = __import__("fitz").open(stream=pdf_bytes, filetype="pdf")
+            ss.cap_box_plan = _sb.plan_boxes(_doc)
+            _doc.close()
+        except Exception:  # noqa: BLE001 - boxing is optional; never block captions
+            ss.cap_box_plan = ([], [])
+        ss.cap_box_fp = fingerprint
+    _box_plans, _box_titles = ss.cap_box_plan
+    if _box_titles:
+        add_boxes = st.checkbox(
+            "Add grey boxes to the General Observations, Follow-Up Items and Action Items subsections",
+            value=True, key=f"cap_boxes_{k}", on_change=_invalidate_captions,
+            help="Boxes each subheading and its content in the report's table style (#DDDDDD, 0.7 pt). "
+                 "Main headings stay unboxed, boxes close and reopen at page breaks, and text inside "
+                 "them is inset 1.5 pt so it clears the borders.",
+        )
+        st.caption("Unboxed subsections found: " + " · ".join(t.rstrip(":") for t in _box_titles))
+    else:
+        add_boxes = False
+        st.caption("Every subsection in this report is already boxed, so nothing will be added.")
+
+    st.subheader("4. Generate captioned PDF")
     if st.button("Apply captions", type="primary",
                  help="Captions are left-aligned under each photo. If any caption needs a smaller "
                       "font to clear the next photo row, every caption uses that same size."):
@@ -460,7 +484,12 @@ def render_captions():
             with st.spinner("Applying captions to the photo pages\u2026"):
                 ss.cap_font = caption_font_for(pdf_bytes, jobs, report_no)
                 ss.cap_stats = {}
-                ss.cap_pdf, ss.cap_warnings = apply_captions(pdf_bytes, jobs, report_no, font=ss.cap_font,
+                source = pdf_bytes
+                ss.cap_box_count = 0
+                if add_boxes:
+                    _boxed = _sb.apply_section_boxes(pdf_bytes)
+                    source, ss.cap_box_count = _boxed.pdf, len(_boxed.sections)
+                ss.cap_pdf, ss.cap_warnings = apply_captions(source, jobs, report_no, font=ss.cap_font,
                                                              stats=ss.cap_stats)
                 ss.cap_sig_info = None
                 if sig_files and sig_box is not None:
@@ -483,6 +512,8 @@ def render_captions():
         else:
             st.caption("No \u201cPage X of Y\u201d page numbers were found in this report, so they were left "
                        f"unchanged. Caption prefixes are bold. Engine {_ce.ENGINE_VERSION}")
+        if ss.get("cap_box_count"):
+            st.caption(f"Grey boxes added to {ss.cap_box_count} subsection(s).")
         _sig = ss.get("cap_sig_info")
         if _sig and _sig.get("placed"):
             import fitz
