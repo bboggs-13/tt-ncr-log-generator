@@ -7,13 +7,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
+import io
 import re
 from typing import Iterable
 
 import fitz
 
 ZERO_WIDTH = "\u200b\u200c\u200d\ufeff"
-ENGINE_VERSION = "2026-10-29.3"   # shown in the app so you can confirm what's deployed
+ENGINE_VERSION = "2026-10-29.4"   # shown in the app so you can confirm what's deployed
 
 # --- Caption font: Arial -----------------------------------------------------------
 # Arial is licensed by Microsoft and isn't installed on Streamlit Cloud, so the engine
@@ -655,3 +656,161 @@ def caption_font_for(pdf_bytes: bytes, jobs: Iterable[CaptionJob], report_number
         return resolve_caption_font(doc, caption_texts(jobs, report_number))
     finally:
         doc.close()
+
+
+# --- Signatures --------------------------------------------------------------------
+MAX_SIGNATURES = 2
+_SIGNED_LABEL = re.compile(r"^(Signed|Signatures?)\s*:", re.I)
+_DATE_LABEL = re.compile(r"^Date\s*:", re.I)
+_SIG_PAD = 2.0          # clearance from the cell border, in points
+_SIG_LABEL_GAP = 6.0    # space between "Signed:" and the first signature
+_SIG_GAP = 8.0          # space between two side-by-side signatures
+
+
+@dataclass
+class SignatureBox:
+    page_index: int
+    area: tuple[float, float, float, float]   # where signatures may go (inside the cell)
+    cell: tuple[float, float, float, float]   # the whole "Signed:" cell
+    date_cell: tuple[float, float, float, float] | None
+
+    @property
+    def page_number(self) -> int:
+        return self.page_index + 1
+
+
+def _filled_cells(page: fitz.Page) -> list[fitz.Rect]:
+    cells = []
+    for drawing in page.get_drawings():
+        rect = fitz.Rect(drawing["rect"])
+        if drawing.get("fill") is not None and rect.width > 20 and rect.height > 8:
+            cells.append(rect)
+    return cells
+
+
+def find_signature_box(pdf_bytes: bytes) -> SignatureBox | None:
+    """The space to the right of the report's "Signed:" label, inside its table cell."""
+    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+    try:
+        for page_index in range(doc.page_count - 1, -1, -1):   # the sign-off is near the end
+            page = doc[page_index]
+            lines = _text_lines(page)
+            labels = [rect for rect, text in lines if _SIGNED_LABEL.match(text)]
+            if not labels:
+                continue
+            label = labels[-1]
+            # The "Signed:" text is a line by itself; measure the label word only.
+            words = [fitz.Rect(w[:4]) for w in page.get_text("words")
+                     if _SIGNED_LABEL.match(w[4] + (":" if not w[4].endswith(":") else ""))
+                     and abs(w[1] - label.y0) < 3]
+            label_rect = words[0] if words else label
+            dates = [rect for rect, text in lines
+                     if _DATE_LABEL.match(text) and abs(rect.y0 - label.y0) < 4 and rect.x0 > label_rect.x1]
+            date_label = min(dates, key=lambda r: r.x0) if dates else None
+            cells = [c for c in _filled_cells(page) if c.contains(label_rect)]
+            cell = min(cells, key=lambda c: c.width * c.height) if cells else None
+            date_cell = None
+            if date_label is not None:
+                date_cells = [c for c in _filled_cells(page) if c.contains(date_label)]
+                date_cell = min(date_cells, key=lambda c: c.width * c.height) if date_cells else None
+            if cell is None:   # no drawn cell: use the label's row up to the Date label
+                right = (date_label.x0 - 6) if date_label is not None else label_rect.x0 + 200
+                cell = fitz.Rect(label_rect.x0 - 1.5, label_rect.y0 - 4, right, label_rect.y1 + 4)
+            right = cell.x1 - _SIG_PAD - 0.8                      # border lines are ~0.7 pt
+            if date_cell is not None:
+                right = min(right, date_cell.x0 - _SIG_PAD - 0.8)
+            if date_label is not None:
+                right = min(right, date_label.x0 - _SIG_PAD - 0.8)
+            area = fitz.Rect(label_rect.x1 + _SIG_LABEL_GAP, cell.y0 + _SIG_PAD + 0.7,
+                             right, cell.y1 - _SIG_PAD)
+            if area.width < 20 or area.height < 6:
+                continue
+            return SignatureBox(page_index, _rect_tuple(area), _rect_tuple(cell),
+                                _rect_tuple(date_cell) if date_cell is not None else None)
+        return None
+    finally:
+        doc.close()
+
+
+def prepare_signature(image_bytes: bytes) -> tuple[bytes, float]:
+    """Trim blank margins and drop a white/off-white background. Returns (PNG, width/height)."""
+    from PIL import Image, ImageOps
+
+    image = ImageOps.exif_transpose(Image.open(io.BytesIO(image_bytes))).convert("RGBA")
+    if max(image.size) > 2400:
+        image.thumbnail((2400, 2400))
+    pixels = image.load()
+    width, height = image.size
+    # Ink = clearly darker than the paper (or explicitly opaque on a transparent PNG).
+    gray = ImageOps.grayscale(Image.alpha_composite(Image.new("RGBA", image.size, "white"), image))
+    paper = sorted(gray.getdata())[int(width * height * 0.6)]          # typical background level
+    threshold = min(paper - 40, 215)
+    ink = gray.point(lambda v: 255 if v < threshold else 0)
+    alpha = image.getchannel("A").point(lambda a: 255 if a > 40 else 0)
+    from PIL import ImageChops
+    mask = ImageChops.multiply(ink, alpha)
+    box = mask.getbbox()
+    if box is None:
+        raise ValueError("no signature found in the image (it looks blank)")
+    margin = max(2, int(0.02 * max(box[2] - box[0], box[3] - box[1])))
+    box = (max(0, box[0] - margin), max(0, box[1] - margin),
+           min(width, box[2] + margin), min(height, box[3] + margin))
+    image = image.crop(box)
+    gray = gray.crop(box)
+    # Fade the paper to transparent; keep the ink's own colour.
+    soft = gray.point(lambda v: 0 if v >= paper - 12 else (255 if v <= threshold else
+                                int(255 * (paper - 12 - v) / max(1, paper - 12 - threshold))))
+    image.putalpha(ImageChops.multiply(image.getchannel("A"), soft))
+    if max(image.size) > 1200:
+        image.thumbnail((1200, 1200))
+    out = io.BytesIO()
+    image.save(out, format="PNG", optimize=True)
+    return out.getvalue(), image.width / image.height
+
+
+def layout_signatures(area: fitz.Rect, ratios: list[float]) -> list[fitz.Rect]:
+    """Scale signatures to fit `area`: one on its own, two side by side (left-aligned)."""
+    area = fitz.Rect(area)
+    if not ratios:
+        return []
+    slot_width = (area.width - _SIG_GAP * (len(ratios) - 1)) / len(ratios)
+    rects = []
+    x = area.x0
+    for ratio in ratios:
+        width = min(slot_width, area.height * ratio)
+        height = width / ratio
+        top = area.y0 + (area.height - height) / 2
+        rects.append(fitz.Rect(x, top, x + width, top + height))
+        x += slot_width + _SIG_GAP
+    return rects
+
+
+def apply_signatures(pdf_bytes: bytes, images: list[bytes]) -> tuple[bytes, list[str], dict]:
+    """Place 1-2 signature images in the "Signed:" box. Returns (PDF, warnings, info)."""
+    info = {"placed": 0, "page": None}
+    if not images:
+        return pdf_bytes, [], info
+    if len(images) > MAX_SIGNATURES:
+        return pdf_bytes, [f"Only {MAX_SIGNATURES} signatures fit; none were added."], info
+    box = find_signature_box(pdf_bytes)
+    if box is None:
+        return pdf_bytes, ['No "Signed:" box was found in the report, so signatures were not added.'], info
+    prepared, warnings = [], []
+    for number, data in enumerate(images, start=1):
+        try:
+            prepared.append(prepare_signature(data))
+        except Exception as exc:  # noqa: BLE001 - unreadable or blank image
+            warnings.append(f"Signature {number} was not added: {exc}.")
+    if not prepared:
+        return pdf_bytes, warnings, info
+    area = fitz.Rect(box.area)
+    rects = layout_signatures(area, [ratio for _png, ratio in prepared])
+    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+    page = doc[box.page_index]
+    for (png, _ratio), rect in zip(prepared, rects):
+        page.insert_image(rect, stream=png, keep_proportion=True, overlay=True)
+    output = doc.tobytes(garbage=3, deflate=True)
+    doc.close()
+    info.update(placed=len(prepared), page=box.page_number,
+                rects=[_rect_tuple(r) for r in rects], area=box.area, date_cell=box.date_cell)
+    return output, warnings, info
