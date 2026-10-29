@@ -437,6 +437,7 @@ def render_captions():
                     st.warning(w)
         else:
             st.success("Captioned PDF is ready. No layout warnings were reported.")
+        st.caption("Page numbers (\u201cPage X of Y\u201d) are set to 8 pt.")
         _font = ss.get("cap_font")
         if _font is not None and _font.is_arial:
             st.caption(f"Caption font: {_font.label}")
