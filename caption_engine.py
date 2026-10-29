@@ -339,6 +339,45 @@ def _fit_font_size(text: str, rect: fitz.Rect, max_size: float, min_size: float,
     return None
 
 
+# --- Page numbers -------------------------------------------------------------------
+PAGE_NUMBER_SIZE = 8.0
+_PAGE_NUMBER = re.compile(r"^Page\s+\d+\s+of\s+\d+$", re.I)
+_BASE14 = {"helvetica": "helv", "helvetica-bold": "hebo", "times-roman": "tiro", "courier": "cour"}
+
+
+@dataclass
+class _PageNumber:
+    text: str
+    redact_rect: fitz.Rect
+    right: float
+    baseline: float
+    font: str
+    color: tuple[float, float, float]
+
+
+def _find_page_numbers(page: fitz.Page) -> list[_PageNumber]:
+    """'Page X of Y' lines on a page (PlanRadar puts one at the bottom right)."""
+    found = []
+    for block in page.get_text("dict").get("blocks", []):
+        for line in block.get("lines", []):
+            spans = [sp for sp in line.get("spans", []) if sp.get("text", "").strip()]
+            text = clean_text("".join(sp.get("text", "") for sp in line.get("spans", [])))
+            if not spans or not _PAGE_NUMBER.match(text):
+                continue
+            first = spans[0]
+            size = first["size"]
+            baseline = first["origin"][1]
+            x0 = min(sp["bbox"][0] for sp in spans)
+            x1 = max(sp["bbox"][2] for sp in spans)
+            # Tight box around the glyphs only, so text just above (the notice) is untouched.
+            rect = fitz.Rect(x0 - 0.5, baseline - size * 0.8, x1 + 0.5, baseline + size * 0.25)
+            rgb = first.get("color", 0)
+            color = (((rgb >> 16) & 255) / 255, ((rgb >> 8) & 255) / 255, (rgb & 255) / 255)
+            font = _BASE14.get(first.get("font", "").split("+")[-1].lower(), "helv")
+            found.append(_PageNumber(text, rect, x1, baseline, font, color))
+    return found
+
+
 def apply_captions(
     pdf_bytes: bytes,
     jobs: Iterable[CaptionJob],
@@ -347,11 +386,13 @@ def apply_captions(
     max_font_size: float = 10.5,
     min_font_size: float = 5.5,
     font: CaptionFont | None = None,
+    page_number_size: float | None = PAGE_NUMBER_SIZE,
 ) -> tuple[bytes, list[str]]:
     """Apply captions to photo-only locations and return (PDF bytes, warnings).
 
     Captions are set in Arial when available (see resolve_caption_font); pass `font`
-    to reuse a font already resolved with caption_font_for().
+    to reuse a font already resolved with caption_font_for(). Every "Page X of Y"
+    is rewritten at `page_number_size` (pass None to leave page numbers alone).
     """
     doc = fitz.open(stream=pdf_bytes, filetype="pdf")
     jobs = list(jobs)
@@ -419,7 +460,17 @@ def apply_captions(
             page.add_redact_annot(rect, fill=None, cross_out=False)
             pages_with_redactions.add(job.page_index)
 
-    # Remove only old caption text; leave images and vector artwork untouched.
+    page_numbers: dict[int, list[_PageNumber]] = {}
+    if page_number_size:
+        for page_index, page in enumerate(doc):
+            numbers = [n for n in _find_page_numbers(page)]
+            if numbers:
+                page_numbers[page_index] = numbers
+                for number in numbers:
+                    page.add_redact_annot(number.redact_rect, fill=None, cross_out=False)
+                pages_with_redactions.add(page_index)
+
+    # Remove only old caption / page-number text; leave images and vector artwork untouched.
     for page_index in pages_with_redactions:
         doc[page_index].apply_redactions(images=0, graphics=0, text=0)
 
@@ -435,6 +486,15 @@ def apply_captions(
         )
         if remaining < -0.01:
             warnings.append(f"Page {job.page_number}, photo {job.photo_number}: unexpected text-fit issue during export.")
+
+    for page_index, numbers in page_numbers.items():
+        page = doc[page_index]
+        for number in numbers:
+            width = fitz.get_text_length(number.text, fontname=number.font, fontsize=page_number_size)
+            page.insert_text(  # keep the right edge and baseline, so it stays bottom-right
+                (number.right - width, number.baseline), number.text,
+                fontname=number.font, fontsize=page_number_size, color=number.color, overlay=True,
+            )
 
     if fonts_added:
         try:
