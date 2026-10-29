@@ -172,9 +172,10 @@ class CaptionFontTests(unittest.TestCase):
             for block in page.get_text("dict")["blocks"]
             for line in block.get("lines", [])
             for span in line["spans"]
-            if span["text"].startswith("42.NCR.3-1")
+            if span["text"].strip()
+            and span["bbox"][1] > 300 and span["bbox"][3] < 345
         }
-        self.assertEqual(fonts, {"LiberationSans"})
+        self.assertEqual(fonts, {"LiberationSans", "LiberationSans-Bold"})
         photo_edge = page.get_pixmap(clip=fitz.Rect(100, 313, 101, 315), matrix=fitz.Matrix(4, 4))
         self.assertLess(photo_edge.pixel(1, 1)[0], 235)  # still photo-gray, not painted white
 
@@ -214,6 +215,48 @@ class PageNumberTests(unittest.TestCase):
         report_no, jobs, _ = analyze_pdf(source)
         output, _ = apply_captions(source, jobs, report_no, page_number_size=None)
         self.assertEqual({n[1] for n in self._page_numbers(output)}, {10.0})
+
+
+class CaptionStyleTests(unittest.TestCase):
+    def test_prefix_is_bold_and_description_is_regular(self):
+        source = make_sample_pdf()
+        report_no, jobs, _ = analyze_pdf(source)
+        output, _ = apply_captions(source, jobs, report_no)
+        page = fitz.open(stream=output, filetype="pdf")[1]
+        spans = [
+            span for block in page.get_text("dict")["blocks"] for line in block.get("lines", [])
+            for span in line["spans"] if span["text"].strip()
+        ]
+        prefix = next(sp for sp in spans if sp["text"].startswith("42.NCR.3-1"))
+        self.assertEqual(prefix["text"].strip(), "42.NCR.3-1:")
+        self.assertTrue(prefix["flags"] & 16 or "Bold" in prefix["font"])
+        description = next(sp for sp in spans if sp["origin"][1] == prefix["origin"][1] and sp is not prefix)
+        self.assertNotIn("Bold", description["font"])
+
+    def test_long_caption_wraps_inside_its_area(self):
+        from caption_engine import _layout_caption
+        runs = _layout_caption("65.GO.1-1: " + "Architectural cast-in-place concrete progress " * 3,
+                               fitz.Rect(0, 0, 250, 40), 10, None)
+        self.assertIsNotNone(runs)
+        self.assertGreater(len({baseline for _, baseline, _, _ in runs}), 1)
+        self.assertTrue(runs[0][3])   # first run is the bold prefix
+
+
+class PageNumberDetectionTests(unittest.TestCase):
+    def test_page_number_split_into_separate_text_pieces_is_resized(self):
+        doc = fitz.open()
+        page = doc.new_page(width=595, height=842)
+        x = 510.6
+        for piece in ("Page ", "3", " of ", "10"):   # separate text objects, as some exporters write
+            page.insert_text((x, 831.3), piece, fontname="helv", fontsize=10)
+            x += fitz.get_text_length(piece, fontname="helv", fontsize=10)
+        stats = {}
+        output, warnings = apply_captions(doc.tobytes(), [], "65", stats=stats)
+        self.assertEqual((stats["page_numbers_found"], stats["page_numbers_resized"]), (1, 1))
+        sizes = {
+            span["size"] for span in fitz.open(stream=output, filetype="pdf")[0].get_texttrace()
+        }
+        self.assertEqual(sizes, {8.0})
 
 
 if __name__ == "__main__":
