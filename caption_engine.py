@@ -14,7 +14,7 @@ from typing import Iterable
 import fitz
 
 ZERO_WIDTH = "\u200b\u200c\u200d\ufeff"
-ENGINE_VERSION = "2026-10-29.4"   # shown in the app so you can confirm what's deployed
+ENGINE_VERSION = "2026-10-29.5"   # shown in the app so you can confirm what's deployed
 
 # --- Caption font: Arial -----------------------------------------------------------
 # Arial is licensed by Microsoft and isn't installed on Streamlit Cloud, so the engine
