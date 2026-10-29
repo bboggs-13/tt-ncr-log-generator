@@ -13,6 +13,7 @@ text (#76767B). Theme base lives in .streamlit/config.toml.
 Run locally:   streamlit run app.py
 """
 from pathlib import Path
+_CAPTION_ENGINE_VERSION = "2026-10-29.3"   # must match caption_engine.ENGINE_VERSION
 
 import streamlit as st
 from PIL import Image
@@ -342,6 +343,10 @@ def _invalidate_captions():
 def render_captions():
     """Caption tool: post-processed report PDF → captioned PDF copy."""
     import hashlib
+    import importlib
+    import caption_engine as _ce
+    if getattr(_ce, "ENGINE_VERSION", None) != _CAPTION_ENGINE_VERSION:
+        _ce = importlib.reload(_ce)   # Streamlit can keep an old copy in memory after a code update
     from caption_engine import CaptionJob, analyze_pdf, apply_captions, caption_font_for, format_caption
 
     ss = st.session_state
@@ -428,7 +433,9 @@ def render_captions():
         else:
             with st.spinner("Applying captions to the photo pages\u2026"):
                 ss.cap_font = caption_font_for(pdf_bytes, jobs, report_no)
-                ss.cap_pdf, ss.cap_warnings = apply_captions(pdf_bytes, jobs, report_no, font=ss.cap_font)
+                ss.cap_stats = {}
+                ss.cap_pdf, ss.cap_warnings = apply_captions(pdf_bytes, jobs, report_no, font=ss.cap_font,
+                                                             stats=ss.cap_stats)
 
     if ss.get("cap_pdf"):
         if ss.cap_warnings:
@@ -437,7 +444,14 @@ def render_captions():
                     st.warning(w)
         else:
             st.success("Captioned PDF is ready. No layout warnings were reported.")
-        st.caption("Page numbers (\u201cPage X of Y\u201d) are set to 8 pt.")
+        _stats = ss.get("cap_stats") or {}
+        if _stats.get("page_numbers_found"):
+            st.caption(f"Page numbers resized to 8 pt: {_stats['page_numbers_resized']} of "
+                       f"{_stats['page_numbers_found']} (\u201cPage X of Y\u201d, all {_stats['pages']} pages checked). "
+                       f"Caption prefixes are bold. Engine {_ce.ENGINE_VERSION}")
+        else:
+            st.caption("No \u201cPage X of Y\u201d page numbers were found in this report, so they were left "
+                       f"unchanged. Caption prefixes are bold. Engine {_ce.ENGINE_VERSION}")
         _font = ss.get("cap_font")
         if _font is not None and _font.is_arial:
             st.caption(f"Caption font: {_font.label}")
