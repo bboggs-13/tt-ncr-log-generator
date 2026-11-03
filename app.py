@@ -479,7 +479,8 @@ def render_captions():
     _box_plans, _box_titles = ss.cap_box_plan
     if _box_titles:
         add_boxes = st.checkbox(
-            "Add grey boxes to the General Observations, Follow-Up Items and Action Items subsections",
+            "Add grey boxes to the summary subsections (General Observations, Follow-Up Items, "
+            "Action Items and Summary of Observations)",
             value=True, key=f"cap_boxes_{k}", on_change=_invalidate_captions,
             help="Boxes each subheading and its content in the report's table style (#DDDDDD, 0.7 pt). "
                  "Main headings stay unboxed, boxes close and reopen at page breaks, and text inside "
