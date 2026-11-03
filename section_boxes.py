@@ -1,8 +1,9 @@
 """Grey section boxes for TT site visit reports.
 
 PlanRadar's raw export draws the Executive Summary, observation pages and appendix
-as grey-bordered tables, but leaves the subsections of B. General Observations,
-C. Follow-Up Items and D. Action Items as loose text. This module boxes each of those
+as grey-bordered tables, but leaves the subsections of General Observations,
+Follow-Up Items, Action Items and Summary of Observations as loose text (whatever
+letter each section has in the report format). This module boxes each of those
 subheadings (an 18 pt cell) and the content under it, in the same style as the rest of
 the report: #DDDDDD borders, 0.7 pt wide, spanning 28.5-565.5 pt. Main headings
 ("B. General Observations") stay unboxed. Boxes close at a page break and reopen at
@@ -32,7 +33,12 @@ CLEARANCE = 3.0                  # keep this far from whatever follows a box
 ZERO_WIDTH = "\u200b\u200c\u200d\ufeff\u00a0"
 
 _MAIN_HEADING = re.compile(r"^[A-Z]\.\s+\S")
-_BOXED_SECTIONS = re.compile(r"^[BCD]\.\s", re.I)   # General Observations, Follow-Up Items, Action Items
+# Sections are matched by name, not letter, because the letters move between report
+# formats (the newer format puts B. Follow-Up Items first and the observation summary
+# in E. Summary of Observations, after the ticket pages). Ticket pages such as
+# "D. General Observation #1" (singular) are not matched.
+_BOXED_SECTIONS = re.compile(
+    r"^[A-Z]\.\s+(General Observations|Follow[-\s]?Up Items|Action Items|Summary of Observations)\b", re.I)
 
 
 @dataclass
@@ -125,7 +131,7 @@ def _is_subheading(line: _Line) -> bool:
 
 
 def plan_boxes(doc: fitz.Document) -> tuple[list[BoxPlan], list[str]]:
-    """Find the unboxed subsections of B/C/D and lay out their boxes page by page."""
+    """Find the unboxed subsections of the summary sections and lay out their boxes page by page."""
     flow: list[_Line] = []
     areas, rules = {}, {}
     for index, page in enumerate(doc):
