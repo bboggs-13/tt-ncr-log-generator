@@ -37,6 +37,33 @@ def make_raw_report():
     return doc.tobytes()
 
 
+def make_new_format_report():
+    """Newer format: B. Follow-Up Items, C/D ticket pages, then E. Summary of Observations."""
+    doc = fitz.open()
+    p1 = _page(doc)
+    p1.insert_text((28.5, 120), "B. Follow-Up Items", fontsize=10.5, fontname="hebo")
+    p1.insert_text((28.5, 150), "The following items are to be verified:", fontsize=9, fontname="hebo")
+    p1.insert_text((69.0, 168), "1. Verify flashing", fontsize=9)
+    p2 = _page(doc)
+    p2.insert_text((28.5, 120), "C. Non-Conformance Observation 67.NC.1", fontsize=10.5, fontname="hebo")
+    p2.insert_text((30.0, 150), "Location:", fontsize=9, fontname="hebo")
+    p2.insert_text((28.5, 300), "D. General Observation #1", fontsize=10.5, fontname="hebo")
+    p2.insert_text((30.0, 330), "Location:", fontsize=9, fontname="hebo")
+    p3 = _page(doc)
+    p3.insert_text((28.5, 120), "E. Summary of Observations", fontsize=10.5, fontname="hebo")
+    p3.insert_text((28.5, 150), "Non-conformance Observations:", fontsize=9, fontname="hebo")
+    p3.insert_text((43.5, 168), "67.NC.1 A discontinuity in the thermal insulation", fontsize=9)
+    p3.insert_text((82.5, 184), "Recommended Action(s):", fontsize=9)
+    p3.insert_text((31.0, 700), "   General Observations:", fontsize=9, fontname="hebo")
+    p3.insert_text((69.0, 750), "1. Installation of roofing substrates", fontsize=9)
+    p4 = _page(doc)
+    p4.insert_text((69.0, 110), "2. Installation of aluminum cladding", fontsize=9)
+    p4.insert_text((28.5, 140), "Note: All conditions were reviewed with the GC.", fontsize=9)
+    p4.insert_text((28.5, 200), "F. Appendix", fontsize=10.5, fontname="hebo")
+    p4.insert_text((30.0, 230), "Attendees:", fontsize=9, fontname="hebo")
+    return doc.tobytes()
+
+
 def _boxes(pdf, page_index):
     page = fitz.open(stream=pdf, filetype="pdf")[page_index]
     return sb._grey_rules(page)
@@ -98,6 +125,29 @@ class SectionBoxTests(unittest.TestCase):
         again = sb.apply_section_boxes(self.result.pdf)
         self.assertEqual(again.boxes, [])
         self.assertEqual(again.pdf, self.result.pdf)
+
+
+class NewFormatTests(unittest.TestCase):
+    """Sections are found by name, so the letters can move between report formats."""
+
+    def setUp(self):
+        self.result = sb.apply_section_boxes(make_new_format_report())
+
+    def test_boxes_follow_up_and_summary_of_observations_only(self):
+        self.assertEqual(self.result.sections, ["The following items are to be verified:",
+                                                "Non-conformance Observations:",
+                                                "General Observations:"])
+        self.assertEqual({b.page_index for b in self.result.boxes}, {0, 2, 3})   # ticket pages untouched
+
+    def test_summary_box_continues_onto_next_page_and_stops_before_appendix(self):
+        cont = [b for b in self.result.boxes if b.page_index == 3]
+        self.assertEqual(len(cont), 1)
+        self.assertTrue(cont[0].open_top)
+        self.assertGreater(cont[0].rect[3], 140)            # the Note stays inside the box
+        self.assertLess(cont[0].rect[3], 200 - 10)          # F. Appendix stays outside
+
+    def test_running_twice_adds_nothing(self):
+        self.assertEqual(sb.apply_section_boxes(self.result.pdf).boxes, [])
 
 
 if __name__ == "__main__":
