@@ -319,6 +319,24 @@ def render_ncr_log():
             type="primary",
         )
 
+        # Every log: landscape PDF of the open items, exactly as the workbook opens
+        import log_pdf
+        try:
+            _log_pdf = log_pdf.build_log_pdf(xlsx, _profile)
+        except Exception as e:  # noqa: BLE001 - the Excel download above still works
+            _log_pdf = None
+            st.warning(f"The log PDF couldn't be created: {e}")
+        if _log_pdf:
+            st.download_button(
+                "📄 Download log PDF",
+                data=_log_pdf,
+                file_name=out_name.replace(".xlsx", ".pdf"),
+                mime="application/pdf",
+                help="US Letter landscape with 0.5 in margins. Shows the open items as the Excel log "
+                     "opens, with the same colours and legend. All columns fit the page width; "
+                     "longer logs continue onto more pages with the column headers repeated.",
+            )
+
         # Time Sensitive logs: one-page PDF summary of open items by age band
         if _profile.age_highlight:
             import summary_pdf
