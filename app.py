@@ -490,6 +490,15 @@ def render_captions():
     else:
         add_boxes = False
         st.caption("Every subsection in this report is already boxed, so nothing will be added.")
+    tighten = st.checkbox(
+        "Tighten spacing in the summary sections",
+        value=True, key=f"cap_tighten_{k}", on_change=_invalidate_captions,
+        help="Evens out the space between items in General Observations, Follow-Up Items, Action Items "
+             "and Summary of Observations, using the report's own item spacing (about one blank line). "
+             "Gaps that are too large are pulled up, and items with no gap get the standard gap when "
+             "the page has room. Content only moves within its page (nothing is pulled back from the "
+             "next page), and pages with photos or tables are left alone.",
+    )
 
     st.subheader("4. Generate captioned PDF")
     if st.button("Apply captions", type="primary",
@@ -505,9 +514,11 @@ def render_captions():
                 ss.cap_stats = {}
                 source = pdf_bytes
                 ss.cap_box_count = 0
-                if add_boxes:
-                    _boxed = _sb.apply_section_boxes(pdf_bytes)
+                ss.cap_spacing_notes = []
+                if add_boxes or tighten:
+                    _boxed = _sb.apply_section_boxes(pdf_bytes, tighten=tighten, boxes=add_boxes)
                     source, ss.cap_box_count = _boxed.pdf, len(_boxed.sections)
+                    ss.cap_spacing_notes = _boxed.warnings if tighten else []
                 ss.cap_pdf, ss.cap_warnings = apply_captions(source, jobs, report_no, font=ss.cap_font,
                                                              stats=ss.cap_stats)
                 ss.cap_sig_info = None
@@ -533,6 +544,11 @@ def render_captions():
                        f"unchanged. Caption prefixes are bold. Engine {_ce.ENGINE_VERSION}")
         if ss.get("cap_box_count"):
             st.caption(f"Grey boxes added to {ss.cap_box_count} subsection(s).")
+        _spacing = ss.get("cap_spacing_notes") or []
+        if _spacing:
+            with st.expander(f"Spacing changes ({len(_spacing)})"):
+                for _note in _spacing:
+                    st.caption(_note)
         _sig = ss.get("cap_sig_info")
         if _sig and _sig.get("placed"):
             import fitz
