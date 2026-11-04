@@ -218,15 +218,108 @@ class TightenSpacingTests(unittest.TestCase):
                   if d.get("fill") and d["fill"][0] > 0.8 and d["fill"][1] < 0.5][0]
         self.assertAlmostEqual(orange.y0, 122, places=1)                 # above the gaps: unmoved
 
-    def test_pages_with_photos_are_left_alone(self):
-        r = sb.apply_section_boxes(make_gappy_report(photo=True), tighten=True)
+    def test_photo_pages_are_left_alone(self):
+        src = make_gappy_report(photo=True)
+        doc = fitz.open(stream=src, filetype="pdf")
+        doc[0].insert_text((300, 590), "Photographs:", fontsize=9)
+        r = sb.apply_section_boxes(doc.tobytes(), tighten=True)
         self.assertEqual(r.moves, [])
-        self.assertTrue(any("photo" in w for w in r.warnings))
+
+    def test_images_on_other_pages_move_with_the_content(self):
+        src = make_gappy_report(photo=True)
+        r = sb.apply_section_boxes(src, tighten=True)
+        self.assertTrue(r.moves)
+        before = fitz.open(stream=src, filetype="pdf")[0].get_image_info()[0]["bbox"]
+        after = fitz.open(stream=r.pdf, filetype="pdf")[0].get_image_info()[0]["bbox"]
+        self.assertAlmostEqual(after[3] - after[1], before[3] - before[1], places=1)   # same size
+        self.assertLess(after[1], before[1])                                          # moved up
 
     def test_finished_report_spacing_is_left_alone(self):
         r = sb.apply_section_boxes(make_raw_report(), tighten=True)
         again = sb.apply_section_boxes(r.pdf, tighten=True)
         self.assertEqual(again.moves, [])
+
+
+def _grey(page, rect):
+    page.draw_rect(rect, color=None, fill=(0.867, 0.867, 0.867), width=0)
+
+
+def _cell(page, y0, y1, x0=28.5, x1=565.5):
+    """Grey 0.75 pt cell borders, drawn like PlanRadar's tables."""
+    _grey(page, fitz.Rect(x0, y0, x1, y0 + 0.75))
+    _grey(page, fitz.Rect(x0, y1, x1, y1 + 0.75))
+    _grey(page, fitz.Rect(x0, y0, x0 + 0.75, y1 + 0.75))
+    _grey(page, fitz.Rect(x1 - 0.75, y0, x1, y1 + 0.75))
+
+
+def make_table_report():
+    """Appendix-style table: a cell with empty space under its list, then more rows,
+    plus a location-plan cell with empty space under the plan."""
+    doc = fitz.open()
+    p = _page(doc)
+    p.insert_text((28.5, 100), "F. Appendix", fontsize=10.5, fontname="hebo")
+    _cell(p, 119.25, 198.0)
+    p.insert_text((30, 131), "Attendees:", fontsize=9, fontname="hebo")
+    p.insert_text((48.8, 146), "John Doe - 123 Building Systems", fontsize=9)
+    p.insert_text((48.8, 168.5), "Bryce Boggs - Thornton Tomasetti (TT)", fontsize=9)   # 26 pt empty below
+    _cell(p, 198.0, 216.0)
+    p.insert_text((30, 210), "Total Duration on Site: 2 Hours", fontsize=9, fontname="hebo")
+    _cell(p, 216.0, 234.0)
+    p.insert_text((30, 228), "Location:", fontsize=9, fontname="hebo")
+    _cell(p, 234.0, 500.0)                                   # plan cell, plan ends at 400
+    pix = fitz.Pixmap(fitz.csRGB, fitz.IRect(0, 0, 60, 40), 0)
+    pix.clear_with(0x777777)
+    p.insert_image(fitz.Rect(40, 236, 280, 400), pixmap=pix)
+    _cell(p, 520.0, 556.0)
+    p.insert_text((30, 532), "Signed:", fontsize=9, fontname="hebo")              # meant to be empty
+    return doc.tobytes()
+
+
+class TableCellTrimTests(unittest.TestCase):
+    def setUp(self):
+        self.src = make_table_report()
+        self.result = sb.apply_section_boxes(self.src, tighten=True)
+        self.page = fitz.open(stream=self.result.pdf, filetype="pdf")[0]
+
+    def _rules(self):
+        return sorted({round(d["rect"].y0, 1) for d in self.page.get_drawings()
+                       if d.get("fill") and abs(d["fill"][0] - 0.867) < 0.01 and d["rect"].width > 400})
+
+    def test_trims_empty_space_under_lists_and_plans(self):
+        kinds = sorted((m.kind, round(m.dy)) for m in self.result.moves)
+        self.assertEqual(len(kinds), 2, self.result.warnings)
+        attendees_bottom = self._rules()[1]
+        last_line = self.page.search_for("Bryce Boggs")[0].y1
+        self.assertLess(attendees_bottom - last_line, 6)              # was ~26 pt
+        image = [i for i in self.page.get_image_info()][0]["bbox"]
+        plan_bottom = [y for y in self._rules() if y > image[1]][0]
+        self.assertAlmostEqual(plan_bottom, image[3], delta=1.0)      # cell ends at the plan
+
+    def test_signature_cell_is_left_empty(self):
+        def height(page):
+            signed = page.search_for("Signed:")[0]
+            rules = sorted({round(d["rect"].y0, 2) for d in page.get_drawings()
+                            if d.get("fill") and abs(d["fill"][0] - 0.867) < 0.01 and d["rect"].width > 400})
+            above = max(y for y in rules if y < signed.y0)
+            below = min(y for y in rules if y > signed.y1)
+            return below - above
+        before = fitz.open(stream=self.src, filetype="pdf")[0]
+        self.assertAlmostEqual(height(self.page), height(before), places=1)
+
+    def test_rows_below_move_with_the_table_and_words_are_unchanged(self):
+        before = fitz.open(stream=self.src, filetype="pdf")[0]
+        self.assertEqual(sorted(w[4] for w in before.get_text("words")),
+                         sorted(w[4] for w in self.page.get_text("words")))
+        moved = before.search_for("Total Duration")[0].y0 - self.page.search_for("Total Duration")[0].y0
+        self.assertGreater(moved, 15)
+
+    def test_stable_on_a_second_run(self):
+        again = sb.apply_section_boxes(self.result.pdf, tighten=True)
+        self.assertEqual(again.moves, [])
+
+    def test_photo_pages_are_never_moved(self):
+        r = sb.apply_section_boxes(self.src, tighten=True, protect_pages={0})
+        self.assertEqual(r.moves, [])
 
 
 if __name__ == "__main__":
