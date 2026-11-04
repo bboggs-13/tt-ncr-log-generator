@@ -491,13 +491,13 @@ def render_captions():
         add_boxes = False
         st.caption("Every subsection in this report is already boxed, so nothing will be added.")
     tighten = st.checkbox(
-        "Tighten spacing in the summary sections",
+        "Tighten spacing",
         value=True, key=f"cap_tighten_{k}", on_change=_invalidate_captions,
-        help="Evens out the space between items in General Observations, Follow-Up Items, Action Items "
-             "and Summary of Observations, using the report's own item spacing (about one blank line). "
-             "Gaps that are too large are pulled up, and items with no gap get the standard gap when "
-             "the page has room. Content only moves within its page (nothing is pulled back from the "
-             "next page), and pages with photos or tables are left alone.",
+        help="Closes up extra space so the report reads evenly: oversized gaps between items in the "
+             "summary sections, and empty space at the bottom (or top) of table cells such as Attendees, "
+             "Reference Submittals and the Executive Summary. Location plan cells are trimmed to the "
+             "bottom of the plans. Content only moves within its page, photo pages are never moved, "
+             "and every changed page is checked against the original before it is used.",
     )
 
     st.subheader("4. Generate captioned PDF")
@@ -515,10 +515,18 @@ def render_captions():
                 source = pdf_bytes
                 ss.cap_box_count = 0
                 ss.cap_spacing_notes = []
-                if add_boxes or tighten:
-                    _boxed = _sb.apply_section_boxes(pdf_bytes, tighten=tighten, boxes=add_boxes)
+                _sb_current = "protect_pages" in __import__("inspect").signature(_sb.apply_section_boxes).parameters
+                if not _sb_current and tighten:
+                    st.warning("Spacing wasn\u2019t tightened: section_boxes.py in the app\u2019s repo is an "
+                               "older version. Replace it with the one from the latest package.")
+                if _sb_current and (add_boxes or tighten):
+                    _boxed = _sb.apply_section_boxes(pdf_bytes, tighten=tighten, boxes=add_boxes,
+                                                     protect_pages={j.page_index for j in jobs})
                     source, ss.cap_box_count = _boxed.pdf, len(_boxed.sections)
                     ss.cap_spacing_notes = _boxed.warnings if tighten else []
+                elif add_boxes:
+                    _boxed = _sb.apply_section_boxes(pdf_bytes)
+                    source, ss.cap_box_count = _boxed.pdf, len(_boxed.sections)
                 ss.cap_pdf, ss.cap_warnings = apply_captions(source, jobs, report_no, font=ss.cap_font,
                                                              stats=ss.cap_stats)
                 ss.cap_sig_info = None
