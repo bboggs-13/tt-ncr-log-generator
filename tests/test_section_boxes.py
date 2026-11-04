@@ -322,5 +322,103 @@ class TableCellTrimTests(unittest.TestCase):
         self.assertEqual(r.moves, [])
 
 
+def make_page_break_report(first_page_items=18, item_lines=2, start_y=168.0):
+    """General Observations list that breaks across two pages. Items are two lines,
+    15 pt apart at the baseline, 22.2 pt between items, as in PlanRadar."""
+    doc = fitz.open()
+    _page(doc)
+    _page(doc)
+    pitch, between = 15.0, 32.2                    # baseline steps: within an item / between items
+    lines = {0: [], 1: []}
+    page_no, y = 0, start_y
+    n = 0
+    while True:
+        n += 1
+        if page_no == 0 and n > first_page_items:
+            page_no, y = 1, 112.0
+        for k in range(item_lines):
+            text = f"{n}. Installation item {n} was observed in progress" if k == 0 else f"continuation {k} of item {n}"
+            lines[page_no].append((48.8 if k == 0 else 61.5, y, text))
+            y += pitch
+        y += between - pitch
+        if page_no == 1 and n >= first_page_items + 4:
+            break
+    p1 = doc[0]
+    p1.insert_text((28.5, 120), "E. Summary of Observations", fontsize=10.5, fontname="hebo")
+    p1.insert_text((28.5, 150), "General Observations:", fontsize=9, fontname="hebo")
+    for x, yy, text in lines[0]:
+        p1.insert_text((x, yy), text, fontsize=9)
+    p2 = doc[1]
+    for x, yy, text in lines[1]:
+        p2.insert_text((x, yy), text, fontsize=9)
+    p2.insert_text((28.5, y + 10), "Note: All conditions were reviewed with the General Contractor.", fontsize=9)
+    return doc.tobytes()
+
+
+def _order(pdf):
+    d = fitz.open(stream=pdf, filetype="pdf")
+    return [w[4] for page in d for w in page.get_text("words")]
+
+
+class PageFlowTests(unittest.TestCase):
+    """Lines that continue on the next page move up when the page before has room."""
+
+    def _last_line_bottom(self, page):
+        lines = [l for l in sb._lines(page, page.number, *sb._content_area(page)) if not l.blank]
+        return max(l.rect.y1 for l in lines), lines
+
+    def test_whole_item_moves_up_with_standard_spacing(self):
+        src = make_page_break_report(first_page_items=12)   # page 1 ends ~ 560 pt: lots of room
+        r = sb.apply_section_boxes(src, tighten=True, boxes=False)
+        carries = [m for m in r.moves if isinstance(m, sb.Carry)]
+        self.assertTrue(carries, r.warnings)
+        self.assertEqual(_order(src), _order(r.pdf))           # same words, same reading order
+        d = fitz.open(stream=r.pdf, filetype="pdf")
+        bottom, lines = self._last_line_bottom(d[0])
+        self.assertLessEqual(bottom, sb._content_area(d[0])[1] - sb.BOTTOM_MARGIN + 0.01)
+        starts = [l for l in lines if l.text[:1].isdigit()]
+        gaps = {round(b.rect.y0 - a.rect.y1) for a, b in zip(lines, lines[1:]) if b in starts[1:]}
+        self.assertEqual(len(gaps), 1, gaps)                   # every item: the same gap
+        # The rest of page 2 starts where page 2's content started before.
+        before = fitz.open(stream=src, filetype="pdf")[1]
+        first_before = sb._lines(before, 1, *sb._content_area(before))[0].rect.y0
+        first_after = [l for l in sb._lines(d[1], 1, *sb._content_area(d[1])) if not l.blank][0].rect.y0
+        self.assertAlmostEqual(first_after, first_before, delta=0.6)
+
+    def test_item_can_split_across_the_break(self):
+        # Five-line items: page 1 has room for the first three lines of item 7 only.
+        src = make_page_break_report(first_page_items=6, item_lines=5)
+        r = sb.apply_section_boxes(src, tighten=True, boxes=False)
+        self.assertEqual([m.lines for m in r.moves if isinstance(m, sb.Carry)], [3])
+        self.assertEqual(_order(src), _order(r.pdf))
+        d = fitz.open(stream=r.pdf, filetype="pdf")
+        lines = self._last_line_bottom(d[0])[1]
+        first = [l for l in sb._lines(d[1], 1, *sb._content_area(d[1])) if not l.blank][0]
+        self.assertTrue(lines[-3].text.startswith("7."))
+        self.assertTrue(first.text.startswith("continuation 3 of item 7"))
+        self.assertLessEqual(lines[-1].rect.y1, sb._content_area(d[0])[1] - sb.BOTTOM_MARGIN + 0.01)
+        line_gaps = {round(b.rect.y0 - a.rect.y1, 1) for a, b in zip(lines[-3:], lines[-2:])}
+        self.assertEqual(len(line_gaps), 1)                     # normal line spacing inside the item
+
+    def test_nothing_moves_when_there_is_no_room(self):
+        src = make_page_break_report(first_page_items=19)    # page 1 already full
+        r = sb.apply_section_boxes(src, tighten=True, boxes=False)
+        self.assertFalse([m for m in r.moves if isinstance(m, sb.Carry)])
+
+    def test_works_with_boxes_and_is_stable(self):
+        src = make_page_break_report(first_page_items=12)
+        r = sb.apply_section_boxes(src, tighten=True, boxes=True)
+        self.assertTrue([m for m in r.moves if isinstance(m, sb.Carry)])
+        self.assertEqual(_order(src), _order(r.pdf))
+        again = sb.apply_section_boxes(r.pdf, tighten=True, boxes=True)
+        self.assertEqual(again.moves, [])
+        self.assertEqual(again.boxes, [])
+
+    def test_off_when_tighten_is_off(self):
+        src = make_page_break_report(first_page_items=12)
+        r = sb.apply_section_boxes(src, tighten=False, boxes=True)
+        self.assertFalse([m for m in r.moves if isinstance(m, sb.Carry)])
+
+
 if __name__ == "__main__":
     unittest.main()
