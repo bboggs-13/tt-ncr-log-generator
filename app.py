@@ -496,8 +496,10 @@ def render_captions():
         help="Closes up extra space so the report reads evenly: oversized gaps between items in the "
              "summary sections, and empty space at the bottom (or top) of table cells such as Attendees, "
              "Reference Submittals and the Executive Summary. Location plan cells are trimmed to the "
-             "bottom of the plans. Content only moves within its page, photo pages are never moved, "
-             "and every changed page is checked against the original before it is used.",
+             "bottom of the plans. When a summary section continues on the next page and the page "
+             "before has room above the bottom margin, the next lines move up to fill it, keeping "
+             "the normal spacing between list items. Photo pages are never moved, and every changed "
+             "page is checked against the original before it is used.",
     )
 
     st.subheader("4. Generate captioned PDF")
@@ -515,7 +517,7 @@ def render_captions():
                 source = pdf_bytes
                 ss.cap_box_count = 0
                 ss.cap_spacing_notes = []
-                _sb_current = "protect_pages" in __import__("inspect").signature(_sb.apply_section_boxes).parameters
+                _sb_current = hasattr(_sb, "flow_across_pages")
                 if not _sb_current and tighten:
                     st.warning("Spacing wasn\u2019t tightened: section_boxes.py in the app\u2019s repo is an "
                                "older version. Replace it with the one from the latest package.")
@@ -525,7 +527,14 @@ def render_captions():
                     source, ss.cap_box_count = _boxed.pdf, len(_boxed.sections)
                     ss.cap_spacing_notes = _boxed.warnings if tighten else []
                 elif add_boxes:
-                    _boxed = _sb.apply_section_boxes(pdf_bytes)
+                    try:
+                        _boxed = _sb.apply_section_boxes(pdf_bytes)
+                    except Exception:
+                        _boxed = None
+                    if _boxed is None:
+                        st.warning("Section borders weren\u2019t added: section_boxes.py in the app\u2019s repo "
+                                   "doesn\u2019t match app.py. Replace both with the files from the latest package.")
+                        _boxed = type("R", (), {"pdf": pdf_bytes, "sections": []})()
                     source, ss.cap_box_count = _boxed.pdf, len(_boxed.sections)
                 ss.cap_pdf, ss.cap_warnings = apply_captions(source, jobs, report_no, font=ss.cap_font,
                                                              stats=ss.cap_stats)
