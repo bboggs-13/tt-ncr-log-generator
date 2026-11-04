@@ -832,11 +832,11 @@ def _photo_pages(doc: fitz.Document) -> frozenset:
     return frozenset(pages)
 
 
-def apply_section_boxes(pdf_bytes: bytes, tighten: bool = False, boxes: bool = True,
-                        protect_pages=()) -> BoxResult:
-    """Box the summary subsections and, with tighten=True, close up extra space first:
-    oversized gaps in the summary sections and empty space at the bottom of table cells
-    (Appendix, Executive Summary, location plans). Photo pages are never moved."""
+def _single_pass(pdf_bytes: bytes, tighten: bool = False, boxes: bool = True,
+                 protect_pages=(), spacing_for_boxes: bool | None = None) -> BoxResult:
+    """One pass: spacing moves within each page, then boxes. spacing_for_boxes lets a
+    first pass space the content for boxes that a later pass draws."""
+    boxed_spacing = boxes if spacing_for_boxes is None else spacing_for_boxes
     skip: frozenset = frozenset()
     source = fitz.open(stream=pdf_bytes, filetype="pdf")
     protect = frozenset(protect_pages) | _photo_pages(source)
@@ -844,7 +844,7 @@ def apply_section_boxes(pdf_bytes: bytes, tighten: bool = False, boxes: bool = T
         for _attempt in range(len(source) + 1):
             doc = fitz.open(stream=pdf_bytes, filetype="pdf")
             try:
-                plan = plan_layout(doc, tighten=tighten, skip_pages=skip, boxed=boxes, protect_pages=protect)
+                plan = plan_layout(doc, tighten=tighten, skip_pages=skip, boxed=boxed_spacing, protect_pages=protect)
                 if not (plan.boxes and boxes) and not plan.moves:
                     return BoxResult(pdf_bytes, [], [], plan.notes, [])
                 # 1. Prove each moved page renders the same, just closed up.
@@ -892,3 +892,364 @@ def apply_section_boxes(pdf_bytes: bytes, tighten: bool = False, boxes: bool = T
     finally:
         source.close()
     return BoxResult(pdf_bytes, [], [], ["Spacing and boxes were left unchanged (the layout couldn\u2019t be edited safely)."], [])
+
+
+
+# --- Flowing text across page breaks ------------------------------------------------
+# When a summary section continues onto the next page and the page before has room above
+# the bottom margin, the next lines are carried up onto it (as real text, by copying their
+# drawing commands), keeping the report's spacing: the standard gap before a new list item
+# and the normal line spacing inside an item. The rest of the next page moves up so it
+# starts where its content started before.
+BOTTOM_MARGIN = CONTENT_PAD + 1.0      # last line -> body bottom (boxes close 6 pt below it)
+_FILL_OPS = {b"cs", b"sc", b"scn", b"g", b"rg", b"k"}
+_STROKE_OPS = {b"CS", b"SC", b"SCN", b"G", b"RG", b"K"}
+_TEXT_STATE_OPS = {b"Tc", b"Tw", b"Tz", b"TL", b"Ts", b"Tr", b"Tf"}
+
+
+@dataclass
+class Carry:
+    from_page: int                 # page the lines came from
+    to_page: int
+    lines: int
+    label: str
+
+    def note(self) -> str:
+        what = "1 line" if self.lines == 1 else f"{self.lines} lines"
+        return (f"Page {self.to_page + 1}: carried {what} up from page {self.from_page + 1} "
+                f"(\u201c{self.label}\u201d) to fill the space above the bottom margin.")
+
+
+def _standard_gaps(sections: list[_Section]) -> tuple[float, float, float]:
+    """Gap before a list item, after a subheading, and between lines of one item."""
+    item_gaps, head_gaps, line_gaps = [], [], []
+    for sec in sections:
+        seq = [l for l in sec.body if not l.blank]
+        if seq and seq[0].page == sec.head.page:
+            head_gaps.append(seq[0].rect.y0 - sec.head.rect.y1)
+        for a, b in zip(seq, seq[1:]):
+            if a.page != b.page:
+                continue
+            gap = b.rect.y0 - a.rect.y1
+            if _ITEM_START.match(b.text):
+                if 15 <= gap <= 30:
+                    item_gaps.append(gap)
+            elif -1 <= gap <= 10:
+                line_gaps.append(gap)
+    return (_median(item_gaps, DEFAULT_ITEM_GAP),
+            _median([g for g in head_gaps if 0 <= g <= 15], DEFAULT_HEAD_GAP),
+            _median(line_gaps, 5.0))
+
+
+def _text_units(page: fitz.Page):
+    """Each text object on the page with its byte range, baselines (page space) and the
+    graphics state needed to draw it on its own."""
+    doc = page.parent
+    data = b"\n".join(doc.xref_stream(x) or b"" for x in page.get_contents())
+    to_page = page.transformation_matrix
+    ctm, stack = fitz.Matrix(1, 0, 0, 1, 0, 0), []
+    state = {"fill": [], "stroke": [], "gs": [], "text": {}}
+    seg = 0                                            # where the current operator's operands start
+    units = []
+    bt = None
+    tlm, leading = fitz.Matrix(1, 0, 0, 1, 0, 0), 0.0
+    names: set[bytes] = set()
+    depth = 0
+    for kind, value, start, end in _tokens(data):
+        if kind != "op":
+            if kind == "other" and data[start:start + 1] == b"/":
+                names.add(data[start + 1:end])
+            continue
+        op, snippet = value, data[seg:end].strip()
+        operands = data[seg:start].split()
+        if op == b"q":
+            stack.append((ctm, {k: (dict(v) if isinstance(v, dict) else list(v)) for k, v in state.items()}))
+            depth += 1
+        elif op == b"Q":
+            if stack:
+                ctm, state = stack.pop()
+            depth -= 1
+        elif op == b"cm" and len(operands) >= 6:
+            ctm = fitz.Matrix(*[float(v) for v in operands[-6:]]) * ctm
+        elif op in _FILL_OPS:
+            state["fill"] = [snippet] if op in (b"cs", b"g", b"rg", b"k") else state["fill"][:1] + [snippet]
+        elif op in _STROKE_OPS:
+            state["stroke"] = [snippet] if op in (b"CS", b"G", b"RG", b"K") else state["stroke"][:1] + [snippet]
+        elif op == b"gs":
+            state["gs"].append(snippet)
+        if op in _TEXT_STATE_OPS:
+            state["text"][op] = snippet
+            if op == b"TL" and operands:
+                leading = float(operands[-1])
+        if op == b"BT":
+            bt = {"start": start, "ctm": ctm, "baselines": [],
+                  "prefix": b" ".join(state["fill"] + state["stroke"] + state["gs"] + list(state["text"].values())),
+                  "names": set()}
+            names = set()
+            tlm = fitz.Matrix(1, 0, 0, 1, 0, 0)
+        elif bt is not None and op == b"Tm" and len(operands) >= 6:
+            tlm = fitz.Matrix(*[float(v) for v in operands[-6:]])
+        elif bt is not None and op in (b"Td", b"TD") and len(operands) >= 2:
+            tx, ty = float(operands[-2]), float(operands[-1])
+            tlm = fitz.Matrix(1, 0, 0, 1, tx, ty) * tlm
+            if op == b"TD":
+                leading = -ty
+        elif bt is not None and op in (b"T*", b"'", b'"'):
+            tlm = fitz.Matrix(1, 0, 0, 1, 0, -leading) * tlm
+        if bt is not None and op in (b"Tj", b"TJ", b"'", b'"'):
+            bt["baselines"].append(fitz.Point(0, 0).transform(tlm * bt["ctm"] * to_page).y)
+        if op == b"ET" and bt is not None:
+            bt["end"] = end
+            bt["names"] = names | {n for n in re.findall(rb"/([^\s/\[\]()<>{}%]+)", bt["prefix"])}
+            units.append(bt)
+            bt = None
+        seg = end
+    return data, units, depth
+
+
+def _resources(doc: fitz.Document, page: fitz.Page) -> int:
+    """xref of the page's /Resources dictionary (made indirect if it's inline)."""
+    kind, value = doc.xref_get_key(page.xref, "Resources")
+    if kind == "xref":
+        return int(value.split()[0])
+    xref = doc.get_new_xref()
+    doc.update_object(xref, value if kind == "dict" else "<<>>")
+    doc.xref_set_key(page.xref, "Resources", f"{xref} 0 R")
+    return xref
+
+
+def _category(doc: fitz.Document, res_xref: int, cat: str, create: bool = False) -> int | None:
+    kind, value = doc.xref_get_key(res_xref, cat)
+    if kind == "xref":
+        return int(value.split()[0])
+    if kind == "dict" or create:
+        xref = doc.get_new_xref()
+        doc.update_object(xref, value if kind == "dict" else "<<>>")
+        doc.xref_set_key(res_xref, cat, f"{xref} 0 R")
+        return xref
+    return None
+
+
+def _share_resources(doc: fitz.Document, src: fitz.Page, dst: fitz.Page, names: set[bytes]) -> dict[bytes, bytes]:
+    """Make every resource used by the carried text available on dst. Returns renames for
+    names that dst already uses for something else."""
+    s_res, d_res = _resources(doc, src), _resources(doc, dst)
+    renames: dict[bytes, bytes] = {}
+    for cat in ("Font", "ExtGState", "ColorSpace", "Pattern", "Shading", "XObject", "Properties"):
+        s_cat = _category(doc, s_res, cat)
+        if s_cat is None:
+            continue
+        for name in sorted(names):
+            key = name.decode("latin1")
+            kind, value = doc.xref_get_key(s_cat, key)
+            if kind in ("null", "none") or not value:
+                continue
+            d_cat = _category(doc, d_res, cat, create=True)
+            d_kind, d_value = doc.xref_get_key(d_cat, key)
+            if d_kind in ("null", "none") or not d_value:
+                doc.xref_set_key(d_cat, key, value)
+            elif d_value != value:
+                n = 1
+                while doc.xref_get_key(d_cat, f"{key}c{n}")[0] not in ("null", "none"):
+                    n += 1
+                doc.xref_set_key(d_cat, f"{key}c{n}", value)
+                renames[name] = f"{key}c{n}".encode("latin1")
+    return renames
+
+
+def _rename(segment: bytes, renames: dict[bytes, bytes]) -> bytes:
+    if not renames:
+        return segment
+    pattern = re.compile(rb"/(" + b"|".join(re.escape(k) for k in renames) + rb")(?=[\s/\[\]()<>{}%]|$)")
+    return pattern.sub(lambda m: b"/" + renames[m.group(1)], segment)
+
+
+def _flow_candidates(doc: fitz.Document, protect: frozenset):
+    """(page before, page after, section, lines on the page after) for each page break
+    inside an unboxed summary section."""
+    flow, areas, rules = [], {}, {}
+    for index, page in enumerate(doc):
+        areas[index] = _content_area(page)
+        rules[index] = _grey_rules(page)
+        flow.extend(_lines(page, index, *areas[index]))
+    sections = _find_sections(flow, rules)
+    gaps = _standard_gaps(sections)
+    out = []
+    for sec in sections:
+        seq = [sec.head] + [l for l in sec.body if not l.blank]
+        for a, b in zip(seq, seq[1:]):
+            if b.page == a.page + 1 and a.page not in protect and b.page not in protect:
+                out.append((a, b, sec, areas))
+    return out, gaps, flow
+
+
+def _page_ink_bottom(page: fitz.Page, area: tuple[float, float]) -> float:
+    import numpy as np
+    img = _render_gray(page)
+    z = 1 / GRID
+    top, bot = int(area[0] * z) + 2, int(area[1] * z)
+    rows = np.where((img[top:bot, 4:-4] < INK).sum(axis=1) > 0)[0]
+    return (top + rows[-1] + 1) / z if len(rows) else area[0]
+
+
+def _carry_once(pdf_bytes: bytes, protect: frozenset):
+    """Carry lines across the first page break that has room. Returns (pdf, Carry) or None."""
+    import numpy as np
+    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+    try:
+        candidates, (item_gap, head_gap, line_gap), flow = _flow_candidates(doc, protect)
+        for last, first, sec, areas in candidates:
+            p, q = last.page, first.page
+            area_p, area_q = areas[p], areas[q]
+            limit = area_p[1] - BOTTOM_MARGIN
+            # Nothing else may sit below the section's last line on page p.
+            if _page_ink_bottom(doc[p], area_p) > last.rect.y1 + 1.0:
+                continue
+            gap = head_gap if last is sec.head else (item_gap if _ITEM_START.match(first.text) else line_gap)
+            dy = _q(last.rect.y1 + gap - first.rect.y0)          # page q -> page p offset
+            body_q = [l for l in sec.body if l.page == q and not l.blank]
+            carried = []
+            for line in body_q:
+                if line.rect.y1 + dy > limit:
+                    break
+                carried.append(line)
+            if not carried:
+                continue
+            rest = [l for l in flow if l.page == q and not l.blank and l.rect.y0 > carried[-1].rect.y1]
+            if not rest:
+                continue                                          # never leave a page empty
+            band_top, band_bottom = carried[0].rect.y0 - 0.5, carried[-1].rect.y1 + 0.5
+            next_top = rest[0].rect.y0
+            qp = doc[q]
+            # Only plain text may be carried: no images, links, coloured drawings or annotations.
+            band = fitz.Rect(0, band_top, qp.rect.width, next_top)
+            if any(fitz.Rect(i["bbox"]).intersects(band) for i in qp.get_image_info()) or \
+                    any(fitz.Rect(l["from"]).intersects(band) for l in qp.get_links()) or \
+                    any(a.rect.intersects(band) for a in qp.annots()):
+                continue
+            if any(fitz.Rect(d["rect"]).intersects(band) and not _is_background(fitz.Rect(d["rect"]), area_q)
+                   and any(c is not None and min(c[:3]) < 0.98 for c in (d.get("fill"), d.get("color")))
+                   for d in qp.get_drawings()):
+                continue
+            data, units, depth = _text_units(qp)
+            take, drop = [], []
+            ok = True
+            for u in units:
+                inside = [band_top <= y <= band_bottom for y in u["baselines"]]
+                below = [band_top <= y < next_top - 0.5 for y in u["baselines"]]
+                if not u["baselines"]:
+                    continue
+                if all(inside):
+                    take.append(u)
+                elif any(inside) or (any(below) and not all(below)):
+                    ok = False
+                    break
+                elif all(below):
+                    drop.append(u)                                # blank spacer lines in the band
+            if not ok or not take:
+                continue
+            before_p = fitz.open(stream=pdf_bytes, filetype="pdf")
+            # 1. Draw the carried text on page p.
+            pp = doc[p]
+            names = set().union(*(u["names"] for u in take))
+            renames = _share_resources(doc, qp, pp, names)
+            to_page = qp.transformation_matrix
+            if pp.transformation_matrix != to_page:
+                continue
+            shift = to_page * fitz.Matrix(1, 0, 0, 1, 0, dy) * ~to_page
+            extra = [b"q " + _fmt(u["ctm"] * shift) + b"\n"
+                     + _rename(u["prefix"] + b"\n" + data[u["start"]:u["end"]], renames) + b"\nQ"
+                     for u in take]
+            p_data, _, p_depth = _text_units(pp)
+            new_p = b"q\n" + p_data + b"\n" + b"Q\n" * max(p_depth, 0) + b"Q\n" + b"\n".join(extra) + b"\n"
+            xref = doc.get_new_xref()
+            doc.update_object(xref, "<<>>")
+            doc.update_stream(xref, new_p)
+            pp.set_contents(xref)
+            # 2. Remove it from page q and close up the space it leaves.
+            pieces, pos = [], 0
+            for u in sorted(take + drop, key=lambda u: u["start"]):
+                pieces += [data[pos:u["start"]]]
+                pos = u["end"]
+            pieces.append(data[pos:])
+            xref = doc.get_new_xref()
+            doc.update_object(xref, "<<>>")
+            doc.update_stream(xref, b"".join(pieces))
+            qp.set_contents(xref)
+            y0 = _q(carried[0].rect.y0, "down")
+            y1 = _q(next_top - (first.rect.y0 - y0), "down")
+            # The remaining content starts where the carried content started.
+            if y1 - y0 < GRID:
+                continue
+            move = Move(q, y0, y1, -(y1 - y0), 0, 0, "", kind="carry")
+            try:
+                _rewrite_page(qp, [], [move], area_q)
+            except _Conflict:
+                continue
+            out = doc.tobytes(garbage=3, deflate=True)
+            # 3. Check both pages by rendering them.
+            new = fitz.open(stream=out, filetype="pdf")
+            z = 1 / GRID
+            a_p, b_p = _render_gray(before_p[p]).astype(np.int16), _render_gray(new[p]).astype(np.int16)
+            a_q = _render_gray(before_p[q]).astype(np.int16)
+            cut = int((last.rect.y1 + 1.0) * z)
+            good = np.abs(a_p[:cut] - b_p[:cut]).max() <= 60 and np.abs(a_p[int(area_p[1] * z):] - b_p[int(area_p[1] * z):]).max() <= 60
+            src_rows = range(int(band_top * z) - 2, int((band_bottom) * z) + 2)
+            diff = 0
+            for r in src_rows:
+                t = r + int(round(dy * z))
+                if cut <= t < int(area_p[1] * z):
+                    diff += int((np.abs(a_q[r] - b_p[t]) > 60).sum())
+            good = good and diff <= 40
+            # Page q: everything below the band moved up intact (shared check).
+            good = good and _render_matches(before_p[q], new[q], [move], area_q)
+            words_before = sorted(w[4] for i in (p, q) for w in before_p[i].get_text("words"))
+            words_after = sorted(w[4] for i in (p, q) for w in new[i].get_text("words"))
+            good = good and words_before == words_after
+            new.close()
+            before_p.close()
+            if not good:
+                continue
+            return out, Carry(q, p, len(carried), _label(carried[0].text))
+        return None
+    finally:
+        doc.close()
+
+
+def flow_across_pages(pdf_bytes: bytes, protect_pages=()) -> tuple[bytes, list[Carry]]:
+    """Fill room at the bottom of pages with the text that continues on the next page."""
+    protect = frozenset(protect_pages)
+    carries: list[Carry] = []
+    for _ in range(50):
+        try:
+            step = _carry_once(pdf_bytes, protect)
+        except Exception:
+            step = None
+        if step is None:
+            break
+        pdf_bytes, carry = step
+        carries.append(carry)
+    return pdf_bytes, carries
+
+
+def apply_section_boxes(pdf_bytes: bytes, tighten: bool = False, boxes: bool = True,
+                        protect_pages=()) -> BoxResult:
+    """Box the summary subsections and, with tighten=True, close up extra space first:
+    oversized gaps in the summary sections, empty space in table cells (Appendix,
+    Executive Summary, location plans) and room left at the bottom of a page when a
+    summary section continues on the next page. Photo pages are never moved."""
+    if not tighten:
+        return _single_pass(pdf_bytes, tighten=False, boxes=boxes, protect_pages=protect_pages)
+    source = fitz.open(stream=pdf_bytes, filetype="pdf")
+    protect = frozenset(protect_pages) | _photo_pages(source)
+    source.close()
+    spaced = _single_pass(pdf_bytes, tighten=True, boxes=False, protect_pages=protect, spacing_for_boxes=boxes)
+    flowed, carries = flow_across_pages(spaced.pdf, protect)
+    if not carries:
+        if not boxes:
+            return spaced
+        final = _single_pass(spaced.pdf, tighten=False, boxes=True, protect_pages=protect)
+        return BoxResult(final.pdf, final.boxes, final.sections, spaced.warnings + final.warnings, spaced.moves)
+    final = _single_pass(flowed, tighten=True, boxes=boxes, protect_pages=protect)
+    notes = spaced.warnings + [c.note() for c in carries] + final.warnings
+    return BoxResult(final.pdf, final.boxes, final.sections, notes, spaced.moves + carries + final.moves)
