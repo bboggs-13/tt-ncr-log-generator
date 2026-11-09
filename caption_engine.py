@@ -14,7 +14,7 @@ from typing import Iterable
 import fitz
 
 ZERO_WIDTH = "\u200b\u200c\u200d\ufeff"
-ENGINE_VERSION = "2026-10-29.5"   # shown in the app so you can confirm what's deployed
+ENGINE_VERSION = "2026-11-09.1"   # shown in the app so you can confirm what's deployed
 
 # --- Caption font: Arial -----------------------------------------------------------
 # Arial is licensed by Microsoft and isn't installed on Streamlit Cloud, so the engine
@@ -814,3 +814,242 @@ def apply_signatures(pdf_bytes: bytes, images: list[bytes]) -> tuple[bytes, list
     info.update(placed=len(prepared), page=box.page_number,
                 rects=[_rect_tuple(r) for r in rects], area=box.area, date_cell=box.date_cell)
     return output, warnings, info
+
+
+
+# --- Photo groups, previews and reordering ---------------------------------------
+@dataclass
+class PhotoGroup:
+    """The photos of one observation ticket, in grid order (top-left, top-right, next row...)."""
+    key: str
+    observation_type: str | None          # NCR, GO or None when it wasn't detected
+    observation_number: str
+    jobs: list[int]                       # indexes into the job list, in slot order
+    columns: int = 2                      # photos per grid row in the PDF
+    _pages: tuple = ()
+
+    @property
+    def pages(self) -> list[int]:
+        """Page numbers (1-based) the observation's photos are on."""
+        return list(self._pages)
+
+    def title(self, report_number: str = "") -> str:
+        if self.observation_type in {"NCR", "GO"} and self.observation_number:
+            ref = f"{report_number}.{self.observation_type}.{self.observation_number}" if report_number \
+                else f"{self.observation_type} {self.observation_number}"
+            kind = "Non-Conformance Observation" if self.observation_type == "NCR" else "General Observation"
+            return f"{ref} \u00b7 {kind} {self.observation_number}"
+        return "Photos not linked to an observation"
+
+
+def group_photos(jobs: list[CaptionJob]) -> list[PhotoGroup]:
+    """Group photos by the observation ticket they belong to, in report order.
+    Photos with no detected observation are grouped by page."""
+    groups: list[PhotoGroup] = []
+    by_key: dict[str, PhotoGroup] = {}
+    for index, job in enumerate(jobs):
+        if job.observation_type in {"NCR", "GO"} and job.observation_number:
+            key = f"{job.observation_type}.{job.observation_number}"
+        else:
+            key = f"page{job.page_index}"
+        group = by_key.get(key)
+        if group is None:
+            group = PhotoGroup(key, job.observation_type, job.observation_number, [])
+            by_key[key] = group
+            groups.append(group)
+        group.jobs.append(index)
+    for group in groups:
+        group._pages = tuple(sorted({jobs[i].page_index + 1 for i in group.jobs}))
+        first_page = jobs[group.jobs[0]].page_index
+        xs = {round(jobs[i].image_rect[0]) for i in group.jobs if jobs[i].page_index == first_page}
+        all_xs = {round(j.image_rect[0]) for j in jobs if j.page_index == first_page}
+        group.columns = max(1, min(3, len(all_xs) or len(xs)))
+    return groups
+
+
+def photo_previews(pdf_bytes: bytes, jobs: Iterable[CaptionJob], width: int = 240) -> list[bytes]:
+    """Small JPEG previews of each photo (about `width` pixels wide)."""
+    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+    previews = []
+    try:
+        for job in jobs:
+            rect = fitz.Rect(job.image_rect)
+            zoom = width / max(rect.width, 1)
+            pix = doc[job.page_index].get_pixmap(clip=rect, matrix=fitz.Matrix(zoom, zoom), alpha=False)
+            try:
+                previews.append(pix.tobytes("jpg", jpg_quality=70))
+            except Exception:  # noqa: BLE001 - older PyMuPDF without JPEG output
+                previews.append(pix.tobytes("png"))
+    finally:
+        doc.close()
+    return previews
+
+
+def _image_draws(page: fitz.Page):
+    """Each image drawn on the page: (name, byte range of 'name Do', CTM at the draw,
+    page-space rect, graphics-state ops in effect). Also returns the stream and q depth."""
+    from section_boxes import _tokens
+    doc = page.parent
+    data = b"\n".join(doc.xref_stream(x) or b"" for x in page.get_contents())
+    to_page = page.transformation_matrix
+    ctm, stack, gs = fitz.Matrix(1, 0, 0, 1, 0, 0), [], []
+    draws, seg, last_name, depth = [], 0, None, 0
+    for kind, value, start, end in _tokens(data):
+        if kind != "op":
+            if kind == "other" and data[start:start + 1] == b"/":
+                last_name = (start, end)
+            continue
+        op = value
+        operands = data[seg:start].split()
+        if op == b"q":
+            stack.append((ctm, list(gs)))
+            depth += 1
+        elif op == b"Q":
+            if stack:
+                ctm, gs = stack.pop()
+            depth -= 1
+        elif op == b"cm" and len(operands) >= 6:
+            ctm = fitz.Matrix(*[float(v) for v in operands[-6:]]) * ctm
+        elif op == b"gs":
+            gs.append(data[seg:end].strip())
+        elif op == b"Do" and last_name:
+            m = ctm * to_page
+            corners = [fitz.Point(x, y) * m for x in (0, 1) for y in (0, 1)]
+            rect = fitz.Rect(min(p.x for p in corners), min(p.y for p in corners),
+                             max(p.x for p in corners), max(p.y for p in corners))
+            draws.append({"name": data[last_name[0] + 1:last_name[1]], "start": last_name[0], "end": end,
+                          "ctm": ctm, "rect": rect, "gs": list(gs)})
+        seg = end
+    return data, draws, depth
+
+
+def _xobject_is_image(doc: fitz.Document, page: fitz.Page, name: bytes) -> bool:
+    import section_boxes as sb
+    cat = sb._category(doc, sb._resources(doc, page), "XObject")
+    if cat is None:
+        return False
+    kind, value = doc.xref_get_key(cat, name.decode("latin1"))
+    if kind != "xref":
+        return False
+    return doc.xref_get_key(int(value.split()[0]), "Subtype")[1] == "/Image"
+
+
+def reorder_photos(pdf_bytes: bytes, jobs: list[CaptionJob], orders: dict[str, list[int]],
+                   groups: list[PhotoGroup]) -> tuple[bytes, list[CaptionJob], list[str]]:
+    """Move photos to new grid positions within their observation.
+
+    `orders[group.key]` lists the group's job indexes in the new order: the first goes in
+    the first slot (top-left), the second in the next slot, and so on. A photo keeps its
+    own caption text; its photo number becomes its new position. Returns the PDF, the
+    jobs in their new slots (ready for apply_captions) and any notes."""
+    import section_boxes as sb
+    moves: list[tuple[int, int]] = []            # (job index of the photo, job index of its new slot)
+    new_jobs = [replace_job(job) for job in jobs]
+    for group in groups:
+        order = orders.get(group.key) or group.jobs
+        if sorted(order) != sorted(group.jobs):
+            return pdf_bytes, jobs, [f"{group.title()}: the photo order wasn't valid, so it was left as is."]
+        for slot, photo in zip(group.jobs, order):
+            if slot != photo:
+                moves.append((photo, slot))
+            new_jobs[slot].caption = jobs[photo].caption
+            new_jobs[slot].warning = jobs[photo].warning
+    if not moves:
+        return pdf_bytes, new_jobs, []
+
+    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+    try:
+        digests = {}
+        pages = sorted({jobs[i].page_index for move in moves for i in move})
+        for page_index in pages:
+            for info in doc[page_index].get_image_info(hashes=True):
+                digests[(page_index, tuple(round(v) for v in info["bbox"]))] = info["digest"]
+
+        def digest(job: CaptionJob):
+            return digests.get((job.page_index, tuple(round(v) for v in job.image_rect)))
+
+        expected = {slot: digest(jobs[photo]) for photo, slot in moves}
+        streams, found = {}, {}
+        for page_index in pages:
+            data, draws, depth = _image_draws(doc[page_index])
+            streams[page_index] = [data, depth, [], []]          # data, depth, removals, placements
+            for draw in draws:
+                for index in {i for move in moves for i in move}:
+                    job = jobs[index]
+                    if job.page_index == page_index and abs(draw["rect"].x0 - job.image_rect[0]) < 1 \
+                            and abs(draw["rect"].y0 - job.image_rect[1]) < 1 \
+                            and abs(draw["rect"].x1 - job.image_rect[2]) < 1 \
+                            and abs(draw["rect"].y1 - job.image_rect[3]) < 1:
+                        if index in found:
+                            raise ValueError("two images in one photo slot")
+                        if not _xobject_is_image(doc, doc[page_index], draw["name"]):
+                            raise ValueError("photo isn't a plain image")
+                        found[index] = draw
+        if len(found) != len({i for move in moves for i in move}):
+            return pdf_bytes, jobs, ["Some photos couldn\u2019t be located in the PDF, so the photo order was left as is."]
+
+        for photo, slot in moves:
+            src, dst = jobs[photo], jobs[slot]
+            draw = found[photo]
+            old, cell = fitz.Rect(src.image_rect), fitz.Rect(dst.image_rect)
+            # Same size as the slot's photo in PlanRadar's grid; otherwise fit inside the slot.
+            scale = min(cell.width / old.width, cell.height / old.height, 1.0) \
+                if (abs(old.width - cell.width) > 0.5 or abs(old.height - cell.height) > 0.5) else 1.0
+            if old.width * scale > cell.width + 0.5 or old.height * scale > cell.height + 0.5:
+                scale = min(cell.width / old.width, cell.height / old.height)
+            new = fitz.Rect(cell.x0, cell.y0, cell.x0 + old.width * scale, cell.y0 + old.height * scale)
+            to_page = doc[src.page_index].transformation_matrix
+            move = (fitz.Matrix(1, 0, 0, 1, -old.x0, -old.y0) * fitz.Matrix(scale, 0, 0, scale, 0, 0)
+                    * fitz.Matrix(1, 0, 0, 1, new.x0, new.y0))
+            target_page = doc[dst.page_index]
+            ctm = draw["ctm"] * to_page * move * ~target_page.transformation_matrix
+            names = {draw["name"]} | {n for g in draw["gs"] for n in re.findall(rb"/([^\s/\[\]()<>{}%]+)", g)}
+            renames = sb._share_resources(doc, doc[src.page_index], target_page, names) \
+                if src.page_index != dst.page_index else {}
+            ops = sb._rename(b" ".join(draw["gs"]) + b"\n/" + draw["name"] + b" Do", renames)
+            streams[src.page_index][2].append((draw["start"], draw["end"]))
+            streams[dst.page_index][3].append(b"q " + sb._fmt(ctm) + b"\n" + ops + b"\nQ")
+            new_jobs[slot].image_rect = _rect_tuple(new)
+
+        for page_index, (data, depth, removals, placements) in streams.items():
+            pieces, pos = [], 0
+            for start, end in sorted(removals):
+                pieces.append(data[pos:start])
+                pos = end
+            pieces.append(data[pos:])
+            body = b"".join(pieces)
+            stream = b"q\n" + body + b"\n" + b"Q\n" * max(depth, 0) + b"Q\n" + b"\n".join(placements) + b"\n"
+            xref = doc.get_new_xref()
+            doc.update_object(xref, "<<>>")
+            doc.update_stream(xref, stream)
+            doc[page_index].set_contents(xref)
+        output = doc.tobytes(garbage=3, deflate=True)
+    except (ValueError, RuntimeError) as exc:
+        return pdf_bytes, jobs, [f"The photo order couldn\u2019t be changed safely ({exc}), so it was left as is."]
+    finally:
+        doc.close()
+
+    # Check: every moved slot now shows the photo that was put there, and nothing else changed.
+    check = fitz.open(stream=output, filetype="pdf")
+    try:
+        for photo, slot in moves:
+            job = new_jobs[slot]
+            shown = [i["digest"] for i in check[job.page_index].get_image_info(hashes=True)
+                     if fitz.Rect(i["bbox"]).contains(_middle(job.image_rect))]
+            if shown != [expected[slot]]:
+                return pdf_bytes, jobs, ["The photo order couldn\u2019t be verified after moving the photos, "
+                                         "so it was left as is."]
+    finally:
+        check.close()
+    moved = len(moves)
+    return output, new_jobs, [f"Photo order changed: {moved} photo{'s' if moved != 1 else ''} moved to a new position."]
+
+
+def _middle(rect) -> fitz.Point:
+    r = fitz.Rect(rect)
+    return fitz.Point((r.x0 + r.x1) / 2, (r.y0 + r.y1) / 2)
+
+
+def replace_job(job: CaptionJob) -> CaptionJob:
+    from dataclasses import replace
+    return replace(job, old_text_rects=list(job.old_text_rects))
