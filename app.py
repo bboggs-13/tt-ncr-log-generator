@@ -1,8 +1,8 @@
 """Site Visit Post-Processing Tools — Streamlit web app.
 
 Two TT site-visit tools behind one "What would you like to do?" choice:
-  • Generate report captions — adds REPORT.NCR/GO.OBS-n captions to the photos in a
-    post-processed site visit report PDF (caption_engine.py).
+  • Post-process report — captions the photos (REPORT.NCR/GO.OBS-n), adds section
+    borders, tightens spacing and adds signatures (caption_engine.py, section_boxes.py).
   • Generate an NCR log — converts a PlanRadar CSV export into the formatted TT
     Excel log, plus the Time Sensitive summary PDF (engine.py, summary_pdf.py).
 
@@ -13,7 +13,7 @@ text (#76767B). Theme base lives in .streamlit/config.toml.
 Run locally:   streamlit run app.py
 """
 from pathlib import Path
-_CAPTION_ENGINE_VERSION = "2026-10-29.5"   # must match caption_engine.ENGINE_VERSION
+_CAPTION_ENGINE_VERSION = "2026-11-09.1"   # must match caption_engine.ENGINE_VERSION
 
 import streamlit as st
 from PIL import Image
@@ -178,17 +178,17 @@ st.markdown(
 
 # --- Header ---
 st.image(str(engine.LOGO_PATH), width=280)
-st.markdown('<div class="tt-eyebrow">Façade Engineering · Quality Control</div>', unsafe_allow_html=True)
+st.markdown('<div class="tt-eyebrow">Façade Engineering</div>', unsafe_allow_html=True)
 st.title("Site Visit Post-Processing Tools")
 st.markdown('<hr class="tt-rule">', unsafe_allow_html=True)
-st.caption("Tools for finishing PlanRadar site visit outputs: caption the photos in a report, "
+st.caption("Tools for finishing PlanRadar site visit outputs: post-process a report, "
            "or turn a non-conformance export into the formatted TT log.")
 
-TOOL_CAPTIONS = "Generate report captions"
+TOOL_CAPTIONS = "Post-process report"
 TOOL_NCR = "Generate an NCR log"
 _TOOL_TIPS = (
-    "Generate report captions: upload a post-processed site visit report PDF and add "
-    "REPORT.NCR/GO.OBS-n captions to its photos.  ·  Generate an NCR log: upload a "
+    "Post-process report: upload a site visit report PDF to caption its photos, add "
+    "section borders, tighten spacing and add signatures.  ·  Generate an NCR log: upload a "
     "PlanRadar CSV export and download the formatted TT Excel log."
 )
 
@@ -358,6 +358,41 @@ def _invalidate_captions():
     st.session_state.cap_pdf = None
 
 
+def _move_photo(group_key, photo, pos_key, k):
+    """Move a photo to the position picked for it; the photos in between shift along."""
+    ss = st.session_state
+    order = ss.cap_order[group_key]
+    new = int(ss[pos_key]) - 1
+    if photo not in order or not 0 <= new < len(order) or order.index(photo) == new:
+        return
+    order.remove(photo)
+    order.insert(new, photo)
+    for position, other in enumerate(order, start=1):
+        ss[f"cap_pos_{k}_{other}"] = position
+    _invalidate_captions()
+
+
+def _reset_photo_order(group_key, original, k):
+    ss = st.session_state
+    ss.cap_order[group_key] = list(original)
+    for position, photo in enumerate(original, start=1):
+        ss[f"cap_pos_{k}_{photo}"] = position
+    _invalidate_captions()
+
+
+def _slot_label(jobs, group, position):
+    """'3 · page 6, row 2, left' for a slot in the observation's photo grid."""
+    slot = jobs[group.jobs[position - 1]]
+    same_page = [jobs[i] for i in group.jobs if jobs[i].page_index == slot.page_index]
+    rows = sorted({round(j.image_rect[1]) for j in same_page})
+    cols = sorted({round(j.image_rect[0]) for j in jobs if j.page_index == slot.page_index})
+    row = rows.index(round(slot.image_rect[1])) + 1
+    col = cols.index(round(slot.image_rect[0])) if round(slot.image_rect[0]) in cols else 0
+    side = {1: "", 2: ["left", "right"], 3: ["left", "middle", "right"]}.get(len(cols), "")
+    where = f", {side[col]}" if isinstance(side, list) and col < len(side) else ""
+    return f"{position} \u00b7 page {slot.page_number}, row {row}{where}"
+
+
 def render_captions():
     """Caption tool: post-processed report PDF → captioned PDF copy."""
     import hashlib
@@ -367,7 +402,8 @@ def render_captions():
         _ce = importlib.reload(_ce)   # Streamlit can keep an old copy in memory after a code update
     from caption_engine import (
         MAX_SIGNATURES, CaptionJob, analyze_pdf, apply_captions, apply_signatures,
-        caption_font_for, find_signature_box, format_caption,
+        caption_font_for, find_signature_box, format_caption, group_photos, photo_previews,
+        reorder_photos,
     )
 
     ss = st.session_state
@@ -394,6 +430,13 @@ def render_captions():
         ss.cap_fingerprint = fingerprint
         ss.cap_jobs, ss.cap_report_no, ss.cap_notes = detected, report_no, notes
         ss.cap_pdf, ss.cap_warnings = None, []
+        ss.cap_groups = group_photos(detected)
+        ss.cap_order = {g.key: list(g.jobs) for g in ss.cap_groups}
+        ss.cap_order_note = ""
+        try:
+            ss.cap_previews = photo_previews(pdf_bytes, detected, width=360)
+        except Exception:  # noqa: BLE001 - previews are a convenience only
+            ss.cap_previews = [None] * len(detected)
     k = fingerprint[:10]          # widget keys are per file, so a new upload starts fresh
 
     st.subheader("1. Confirm report and observations")
@@ -409,41 +452,85 @@ def render_captions():
         st.error("No photos were found. The report needs embedded photos on pages headed \u201cPhotographs:\u201d.")
         st.stop()
 
-    st.success(f"Detected {len(jobs)} photo(s) across {len({j.page_index for j in jobs})} photo page(s).")
+    groups = ss.cap_groups
+    st.success(f"Detected {len(jobs)} photo(s) in {len(groups)} observation(s) across "
+               f"{len({j.page_index for j in jobs})} photo page(s).")
     if any(j.warning for j in jobs):
-        st.warning("Some observation links need review. Check every photo below before exporting.")
+        st.warning("Some photos couldn\u2019t be linked to an observation. Check them below before exporting.")
+    st.caption("Photos are shown in the same grid as the report, numbered from the top left across "
+               "each row. Pick a new position for any photo to reorder it within its observation; "
+               "the other photos shift along. Each photo keeps its own description.")
 
     options = ["NCR", "GO", "Skip"]
-    for i, job in enumerate(jobs):
+    for g_index, group in enumerate(groups):
+        order = ss.cap_order[group.key]
+        first = jobs[group.jobs[0]]
+        default = first.observation_type if first.observation_type in {"NCR", "GO"} else "Skip"
         with st.container(border=True):
-            st.markdown(f"**Page {job.page_number} \u00b7 Photo {job.photo_number}**")
-            c1, c2, c3 = st.columns([1.35, 0.9, 2.25])
-            default = job.observation_type if job.observation_type in {"NCR", "GO"} else "Skip"
+            pages = ", ".join(str(p) for p in group.pages)
+            st.markdown(f"**{group.title(report_no)}**")
+            st.caption(f"{len(group.jobs)} photo{'s' if len(group.jobs) != 1 else ''} \u00b7 "
+                       f"page{'s' if len(group.pages) != 1 else ''} {pages}")
+            c1, c2, c3 = st.columns([1.35, 0.9, 1.2])
             with c1:
                 try:
                     kind = st.segmented_control(
-                        "Observation type", options, default=default, key=f"cap_kind_{k}_{i}",
+                        "Observation type", options, default=default, key=f"cap_gkind_{k}_{g_index}",
                         on_change=_invalidate_captions,
                     ) or default            # clicking the active button again keeps a selection
                 except AttributeError:      # older Streamlit without segmented_control
                     kind = st.radio("Observation type", options, index=options.index(default),
-                                    horizontal=True, key=f"cap_kind_{k}_{i}", on_change=_invalidate_captions)
+                                    horizontal=True, key=f"cap_gkind_{k}_{g_index}",
+                                    on_change=_invalidate_captions)
             with c2:
-                obs = st.text_input("Observation #", value=job.observation_number, key=f"cap_obs_{k}_{i}",
-                                    help="Numbers only, e.g. 1.", on_change=_invalidate_captions).strip()
+                obs = st.text_input("Observation #", value=first.observation_number,
+                                    key=f"cap_gobs_{k}_{g_index}", help="Numbers only, e.g. 1.",
+                                    on_change=_invalidate_captions).strip()
             with c3:
-                caption = st.text_input("Existing photo caption", value=job.caption, key=f"cap_text_{k}_{i}",
-                                        help="Keep or edit the caption already under the photo.",
-                                        on_change=_invalidate_captions).strip()
-            if kind != "Skip" and report_no and obs:
-                st.caption(f"Preview \u00b7 {format_caption(report_no, kind, obs, job.photo_number, caption)}")
-            else:
-                st.caption("This photo will be skipped until its observation type and number are set.")
-            if job.warning:
-                st.warning(job.warning)
-            job.observation_type = None if kind == "Skip" else kind
-            job.observation_number = obs
-            job.caption = caption
+                if order != group.jobs:
+                    st.button("Reset photo order", key=f"cap_reset_{k}_{g_index}",
+                              on_click=_reset_photo_order, args=(group.key, list(group.jobs), k))
+            if first.warning:
+                st.warning(first.warning)
+            # One cell per grid slot, in the report's layout: left to right, then down.
+            positions = list(range(1, len(order) + 1))
+            for row_start in range(0, len(order), group.columns):
+                cells = st.columns(group.columns)
+                for offset, photo in enumerate(order[row_start:row_start + group.columns]):
+                    position = row_start + offset + 1
+                    slot_job = jobs[group.jobs[position - 1]]
+                    job = jobs[photo]
+                    with cells[offset]:
+                        preview = ss.cap_previews[photo] if photo < len(ss.cap_previews) else None
+                        if preview:
+                            st.image(preview)
+                        pos_key = f"cap_pos_{k}_{photo}"
+                        if ss.get(pos_key) != position:
+                            ss[pos_key] = position
+                        st.selectbox(
+                            "Photo position", positions, key=pos_key,
+                            format_func=lambda p, g=group: _slot_label(jobs, g, p),
+                            on_change=_move_photo, args=(group.key, photo, pos_key, k),
+                            help="Where this photo sits in the observation's grid. Photo 1 is top "
+                                 "left, photo 2 top right, photo 3 the left side of row 2, and so on.",
+                        )
+                        caption = st.text_input("Photo description", value=job.caption,
+                                                key=f"cap_text_{k}_{photo}",
+                                                help="Keep or edit the description already under the photo.",
+                                                on_change=_invalidate_captions).strip()
+                        if kind != "Skip" and report_no and obs:
+                            try:
+                                st.caption(format_caption(report_no, kind, obs, slot_job.photo_number, caption))
+                            except ValueError as exc:
+                                st.caption(str(exc))
+                        else:
+                            st.caption("Skipped until the observation type and number are set.")
+                        if photo != group.jobs[position - 1]:
+                            st.caption(f"Originally photo {group.jobs.index(photo) + 1}")
+                        job.caption = caption
+            for photo in group.jobs:
+                jobs[photo].observation_type = None if kind == "Skip" else kind
+                jobs[photo].observation_number = obs
 
     st.subheader("2. Add signatures (optional)")
     if ss.get("cap_sig_fp") != fingerprint:
@@ -512,9 +599,14 @@ def render_captions():
             pass   # the error above the button already explains this
         else:
             with st.spinner("Applying captions to the photo pages\u2026"):
-                ss.cap_font = caption_font_for(pdf_bytes, jobs, report_no)
+                orders = {g.key: list(ss.cap_order[g.key]) for g in groups}
+                ordered_pdf, export_jobs, ss.cap_order_note = pdf_bytes, jobs, ""
+                if any(orders[g.key] != g.jobs for g in groups):
+                    ordered_pdf, export_jobs, _order_notes = reorder_photos(pdf_bytes, jobs, orders, groups)
+                    ss.cap_order_note = " ".join(_order_notes)
+                ss.cap_font = caption_font_for(ordered_pdf, export_jobs, report_no)
                 ss.cap_stats = {}
-                source = pdf_bytes
+                source = ordered_pdf
                 ss.cap_box_count = 0
                 ss.cap_spacing_notes = []
                 _sb_current = hasattr(_sb, "flow_across_pages")
@@ -522,21 +614,21 @@ def render_captions():
                     st.warning("Spacing wasn\u2019t tightened: section_boxes.py in the app\u2019s repo is an "
                                "older version. Replace it with the one from the latest package.")
                 if _sb_current and (add_boxes or tighten):
-                    _boxed = _sb.apply_section_boxes(pdf_bytes, tighten=tighten, boxes=add_boxes,
+                    _boxed = _sb.apply_section_boxes(ordered_pdf, tighten=tighten, boxes=add_boxes,
                                                      protect_pages={j.page_index for j in jobs})
                     source, ss.cap_box_count = _boxed.pdf, len(_boxed.sections)
                     ss.cap_spacing_notes = _boxed.warnings if tighten else []
                 elif add_boxes:
                     try:
-                        _boxed = _sb.apply_section_boxes(pdf_bytes)
+                        _boxed = _sb.apply_section_boxes(ordered_pdf)
                     except Exception:
                         _boxed = None
                     if _boxed is None:
                         st.warning("Section borders weren\u2019t added: section_boxes.py in the app\u2019s repo "
                                    "doesn\u2019t match app.py. Replace both with the files from the latest package.")
-                        _boxed = type("R", (), {"pdf": pdf_bytes, "sections": []})()
+                        _boxed = type("R", (), {"pdf": ordered_pdf, "sections": []})()
                     source, ss.cap_box_count = _boxed.pdf, len(_boxed.sections)
-                ss.cap_pdf, ss.cap_warnings = apply_captions(source, jobs, report_no, font=ss.cap_font,
+                ss.cap_pdf, ss.cap_warnings = apply_captions(source, export_jobs, report_no, font=ss.cap_font,
                                                              stats=ss.cap_stats)
                 ss.cap_sig_info = None
                 if sig_files and sig_box is not None:
@@ -559,6 +651,8 @@ def render_captions():
         else:
             st.caption("No \u201cPage X of Y\u201d page numbers were found in this report, so they were left "
                        f"unchanged. Caption prefixes are bold. Engine {_ce.ENGINE_VERSION}")
+        if ss.get("cap_order_note"):
+            st.caption(ss.cap_order_note)
         if ss.get("cap_box_count"):
             st.caption(f"Grey boxes added to {ss.cap_box_count} subsection(s).")
         _spacing = ss.get("cap_spacing_notes") or []
