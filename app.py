@@ -380,19 +380,6 @@ def _reset_photo_order(group_key, original, k):
     _invalidate_captions()
 
 
-def _slot_label(jobs, group, position):
-    """'3 · page 6, row 2, left' for a slot in the observation's photo grid."""
-    slot = jobs[group.jobs[position - 1]]
-    same_page = [jobs[i] for i in group.jobs if jobs[i].page_index == slot.page_index]
-    rows = sorted({round(j.image_rect[1]) for j in same_page})
-    cols = sorted({round(j.image_rect[0]) for j in jobs if j.page_index == slot.page_index})
-    row = rows.index(round(slot.image_rect[1])) + 1
-    col = cols.index(round(slot.image_rect[0])) if round(slot.image_rect[0]) in cols else 0
-    side = {1: "", 2: ["left", "right"], 3: ["left", "middle", "right"]}.get(len(cols), "")
-    where = f", {side[col]}" if isinstance(side, list) and col < len(side) else ""
-    return f"{position} \u00b7 page {slot.page_number}, row {row}{where}"
-
-
 def render_captions():
     """Caption tool: post-processed report PDF → captioned PDF copy."""
     import hashlib
@@ -509,10 +496,10 @@ def render_captions():
                             ss[pos_key] = position
                         st.selectbox(
                             "Photo position", positions, key=pos_key,
-                            format_func=lambda p, g=group: _slot_label(jobs, g, p),
                             on_change=_move_photo, args=(group.key, photo, pos_key, k),
                             help="Where this photo sits in the observation's grid. Photo 1 is top "
-                                 "left, photo 2 top right, photo 3 the left side of row 2, and so on.",
+                                 "left, photo 2 top right, photo 3 the left side of row 2, and so on, "
+                                 "continuing onto the next page if the photos run over.",
                         )
                         caption = st.text_input("Photo description", value=job.caption,
                                                 key=f"cap_text_{k}_{photo}",
