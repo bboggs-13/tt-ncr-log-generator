@@ -91,6 +91,11 @@ class EmailTests(unittest.TestCase):
     def test_wording_options(self):
         s = ne.extract_summary(SYNTH)
         s.corrected_ids = ["3.NC.1"]
+        self.assertEqual(s.inspection_type, "Special Inspection")
+        self.assertEqual(ne.default_intro(s),
+                         "Please see below a summary of the non-conformances observed during TT's special "
+                         "inspection on 01/02/2026 as documented in Special Inspection Report #12. "
+                         "The full report and NCR log is attached for reference.")
         em = ne.build_email(s, ne.EmailWording(greeting="Hi Sal,", intro="Custom intro.", closing="",
                                                sign_off="Best,", include_corrected=False))
         self.assertTrue(em.text.startswith("Hi Sal,\n\nCustom intro."))
