@@ -405,19 +405,37 @@ def _reset_photo_order(group_key, original, k):
 # HTML/JS, no build step). If it's missing or out of date, the app falls back to the
 # position dropdowns.
 _PHOTO_GRID_DIR = Path(__file__).resolve().parent / "components" / "photo_grid"
-_PHOTO_GRID_VERSION = "2026-11-17.1"       # must match PHOTO_GRID_VERSION in its index.html
+_PHOTO_GRID_VERSION = "2026-11-17.2"       # must match PHOTO_GRID_VERSION in its index.html
 _photo_grid_func = None
+_photo_grid_problem = ""
+
+
+def _photo_grid_issue() -> str:
+    """Why the drag-and-drop grid can't load ("" when it can)."""
+    index = _PHOTO_GRID_DIR / "index.html"
+    if not _PHOTO_GRID_DIR.is_dir():
+        return "the folder components/photo_grid isn't in the app's repo (it goes next to app.py)."
+    if not index.exists():
+        found = sorted(p.name for p in _PHOTO_GRID_DIR.iterdir() if p.is_file())
+        if found:
+            return (f"components/photo_grid has {', '.join(found)} but no index.html. "
+                    "Rename the file to index.html (the .html extension is needed).")
+        return "components/photo_grid/index.html is missing."
+    try:
+        text = index.read_text(encoding="utf-8")
+    except OSError as exc:
+        return f"components/photo_grid/index.html couldn't be read ({exc})."
+    if f"PHOTO_GRID_VERSION {_PHOTO_GRID_VERSION}" not in text:
+        return ("components/photo_grid/index.html doesn't match this app.py. "
+                "Upload both from the latest package.")
+    return ""
 
 
 def _photo_grid():
-    global _photo_grid_func
+    global _photo_grid_func, _photo_grid_problem
     if _photo_grid_func is None:
-        index = _PHOTO_GRID_DIR / "index.html"
-        try:
-            ok = f"PHOTO_GRID_VERSION {_PHOTO_GRID_VERSION}" in index.read_text(encoding="utf-8")
-        except OSError:
-            ok = False
-        if not ok:
+        _photo_grid_problem = _photo_grid_issue()
+        if _photo_grid_problem:
             _photo_grid_func = False
         else:
             import streamlit.components.v1 as components
@@ -654,6 +672,11 @@ def render_captions():
     if any(j.warning for j in jobs):
         st.warning("Some photos couldn\u2019t be linked to an observation. Check them below before exporting.")
     _grid = _photo_grid()
+    if _grid is not None:
+        use_drag = st.toggle("Drag-and-drop photo order", value=True, key="cap_use_drag",
+                             help="Turn off to reorder with a position dropdown under each photo instead.")
+        if not use_drag:
+            _grid = None
     if _grid:
         st.caption("Photos are shown in the same grid as the report, numbered from the top left across "
                    "each row. Drag a photo onto another position to reorder it within its observation; "
@@ -662,6 +685,9 @@ def render_captions():
         st.caption("Photos are shown in the same grid as the report, numbered from the top left across "
                    "each row. Pick a new position for any photo to reorder it within its observation; "
                    "the other photos shift along. Each photo keeps its own description.")
+        if _photo_grid_problem:
+            st.info(f"Drag-and-drop reordering is off, so position dropdowns are shown instead: "
+                    f"{_photo_grid_problem}")
 
     options = ["NCR", "GO", "Skip"]
     for g_index, group in enumerate(groups):
