@@ -1,0 +1,198 @@
+<!DOCTYPE html>
+<!-- TT photo grid: drag-and-drop photo reordering for the Streamlit app.
+     PHOTO_GRID_VERSION 2026-11-17.1  (app.py checks this string)
+     Plain HTML/JS Streamlit component (no build step). It receives the photos in their
+     current order and sends back {version, order} after a move. -->
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  :root { --primary:#004050; --text:#262730; --bg:#ffffff; --bg2:#f0f2f6; --font:"Source Sans Pro", Arial, sans-serif; }
+  html, body { margin:0; padding:0; background:transparent; color:var(--text); font-family:var(--font); }
+  #hint { font-size:13px; opacity:0.75; margin:0 0 6px 0; }
+  #grid { display:grid; gap:10px; padding:2px; }
+  .tile { position:relative; border:2px solid transparent; border-radius:8px; background:var(--bg2);
+          overflow:hidden; cursor:grab; touch-action:none; user-select:none; -webkit-user-select:none;
+          outline:none; transition:transform .12s ease, opacity .12s ease, border-color .12s ease; }
+  .tile img { display:block; width:100%; height:auto; pointer-events:none; -webkit-user-drag:none; }
+  .tile:focus-visible { border-color:var(--primary); }
+  .tile.dragging { opacity:0.35; }
+  .tile.target { border-color:var(--primary); transform:scale(0.97); }
+  .badge { position:absolute; top:6px; left:6px; min-width:22px; height:22px; padding:0 6px; box-sizing:border-box;
+           border-radius:11px; background:var(--primary); color:#ffffff; font:700 13px/22px var(--font);
+           text-align:center; box-shadow:0 1px 3px rgba(0,0,0,.35); }
+  .moved { position:absolute; top:6px; right:6px; height:20px; padding:0 7px; border-radius:10px;
+           background:rgba(0,0,0,.6); color:#ffffff; font:600 11px/20px var(--font); }
+  .ghost { position:fixed; pointer-events:none; z-index:10; opacity:0.9; border-radius:8px; overflow:hidden;
+           box-shadow:0 6px 18px rgba(0,0,0,.35); transform:rotate(1.5deg); }
+  .ghost img { display:block; width:100%; height:auto; }
+  @media (prefers-reduced-motion: reduce) { .tile { transition:none; } .ghost { transform:none; } }
+</style>
+</head>
+<body>
+<div id="hint">Drag a photo onto another position to move it; the other photos shift along. (Or select a photo and use the arrow keys.)</div>
+<div id="grid" role="list"></div>
+<script>
+"use strict";
+// ---- Streamlit component protocol (same messages as streamlit-component-lib) ----
+function send(type, data) {
+  window.parent.postMessage(Object.assign({ isStreamlitMessage: true, type: type }, data), "*");
+}
+function setHeight() { send("streamlit:setFrameHeight", { height: document.documentElement.scrollHeight + 4 }); }
+
+// ---- pure helpers (also unit-tested in Node) ----
+function moveItem(order, from, to) {
+  const out = order.slice();
+  if (from < 0 || from >= out.length || to < 0 || to >= out.length || from === to) return out;
+  const [item] = out.splice(from, 1);
+  out.splice(to, 0, item);
+  return out;
+}
+if (typeof module !== "undefined") { module.exports = { moveItem }; }
+
+// ---- state ----
+let photos = [], columns = 2, version = 0, dragging = null;
+let pending = null;   // version a move was sent against, until the app confirms it
+const grid = typeof document !== "undefined" ? document.getElementById("grid") : null;
+
+function commit(newOrderIdx) {
+  const reordered = newOrderIdx.map(i => photos[i]);
+  photos = reordered;
+  pending = version;
+  draw();
+  send("streamlit:setComponentValue", { value: { version: version, order: photos.map(p => p.id) }, dataType: "json" });
+}
+
+function draw(focusIndex) {
+  grid.style.gridTemplateColumns = "repeat(" + columns + ", minmax(0, 1fr))";
+  grid.innerHTML = "";
+  photos.forEach((p, i) => {
+    const tile = document.createElement("div");
+    tile.className = "tile";
+    tile.tabIndex = 0;
+    tile.dataset.index = String(i);
+    tile.setAttribute("role", "listitem");
+    tile.setAttribute("aria-label", "Photo " + (i + 1) + (p.orig !== i + 1 ? ", originally photo " + p.orig : ""));
+    tile.title = p.orig !== i + 1 ? "Originally photo " + p.orig : "Photo " + (i + 1);
+    const img = document.createElement("img");
+    img.src = p.src; img.alt = ""; img.draggable = false;
+    img.addEventListener("load", setHeight);
+    const badge = document.createElement("div");
+    badge.className = "badge"; badge.textContent = String(i + 1);
+    tile.append(img, badge);
+    if (p.orig !== i + 1) {
+      const moved = document.createElement("div");
+      moved.className = "moved"; moved.textContent = "was " + p.orig;
+      tile.append(moved);
+    }
+    tile.addEventListener("pointerdown", onDown);
+    tile.addEventListener("keydown", onKey);
+    grid.append(tile);
+  });
+  if (focusIndex !== undefined && grid.children[focusIndex]) grid.children[focusIndex].focus();
+  setHeight();
+}
+
+function tileAt(x, y) {
+  const el = document.elementFromPoint(x, y);
+  return el ? el.closest(".tile") : null;
+}
+
+function onDown(e) {
+  if (e.button !== undefined && e.button !== 0) return;
+  const tile = e.currentTarget;
+  dragging = { from: Number(tile.dataset.index), tile: tile, x0: e.clientX, y0: e.clientY,
+               started: false, ghost: null, target: null, pointerId: e.pointerId };
+  tile.setPointerCapture(e.pointerId);
+  tile.addEventListener("pointermove", onMove);
+  tile.addEventListener("pointerup", onUp);
+  tile.addEventListener("pointercancel", onCancel);
+}
+
+function onMove(e) {
+  const d = dragging; if (!d) return;
+  if (!d.started) {
+    if (Math.hypot(e.clientX - d.x0, e.clientY - d.y0) < 6) return;   // a click, not a drag (yet)
+    d.started = true;
+    const r = d.tile.getBoundingClientRect();
+    d.dx = d.x0 - r.left; d.dy = d.y0 - r.top;
+    d.ghost = document.createElement("div");
+    d.ghost.className = "ghost";
+    d.ghost.style.width = r.width + "px";
+    d.ghost.innerHTML = '<img alt="" src="' + photos[d.from].src + '">';
+    document.body.append(d.ghost);
+    d.tile.classList.add("dragging");
+  }
+  d.ghost.style.left = (e.clientX - d.dx) + "px";
+  d.ghost.style.top = (e.clientY - d.dy) + "px";
+  const over = tileAt(e.clientX, e.clientY);
+  if (d.target && d.target !== over) d.target.classList.remove("target");
+  d.target = over && over !== d.tile ? over : null;
+  if (d.target) d.target.classList.add("target");
+}
+
+function finish(drop) {
+  const d = dragging; if (!d) return;
+  dragging = null;
+  d.tile.removeEventListener("pointermove", onMove);
+  d.tile.removeEventListener("pointerup", onUp);
+  d.tile.removeEventListener("pointercancel", onCancel);
+  try { d.tile.releasePointerCapture(d.pointerId); } catch (err) {}
+  if (d.ghost) d.ghost.remove();
+  d.tile.classList.remove("dragging");
+  if (d.target) d.target.classList.remove("target");
+  if (drop && d.started && d.target) {
+    const to = Number(d.target.dataset.index);
+    commit(moveItem(photos.map((_, i) => i), d.from, to));
+  }
+}
+function onUp() { finish(true); }
+function onCancel() { finish(false); }
+
+function onKey(e) {
+  const from = Number(e.currentTarget.dataset.index);
+  const step = { ArrowLeft: -1, ArrowRight: 1, ArrowUp: -columns, ArrowDown: columns }[e.key];
+  if (step === undefined) return;
+  e.preventDefault();
+  const to = Math.max(0, Math.min(photos.length - 1, from + step));
+  if (to === from) return;
+  commit(moveItem(photos.map((_, i) => i), from, to));
+  if (grid.children[to]) grid.children[to].focus();
+}
+
+function applyTheme(theme) {
+  if (!theme) return;
+  const root = document.documentElement.style;
+  if (theme.primaryColor) root.setProperty("--primary", theme.primaryColor);
+  if (theme.textColor) root.setProperty("--text", theme.textColor);
+  if (theme.backgroundColor) root.setProperty("--bg", theme.backgroundColor);
+  if (theme.secondaryBackgroundColor) root.setProperty("--bg2", theme.secondaryBackgroundColor);
+  if (theme.font) root.setProperty("--font", theme.font);
+}
+
+if (typeof window !== "undefined" && grid) {
+  window.addEventListener("message", (event) => {
+    const data = event.data || {};
+    if (data.type !== "streamlit:render") return;
+    if (dragging) return;                       // never redraw under the user's pointer
+    const args = data.args || {};
+    applyTheme(data.theme);
+    // A render still carrying the version a move was sent against is from before the app
+    // applied that move: keep showing the moved order instead of jumping back.
+    if (pending !== null && Number(args.version) === pending) return;
+    pending = null;
+    const incoming = args.photos || [];
+    const sameOrder = incoming.length === photos.length && incoming.every((p, i) => p.id === photos[i].id);
+    photos = incoming;
+    columns = Math.max(1, Number(args.columns) || 2);
+    version = Number(args.version) || 0;
+    const focused = document.activeElement && document.activeElement.classList.contains("tile")
+      ? Number(document.activeElement.dataset.index) : undefined;
+    if (!sameOrder || grid.children.length !== photos.length) draw(focused); else setHeight();
+  });
+  if (window.ResizeObserver) new ResizeObserver(setHeight).observe(document.body);
+  send("streamlit:componentReady", { apiVersion: 1 });
+}
+</script>
+</body>
+</html>
