@@ -6,10 +6,9 @@ Reads the report text (no UI) and builds an email that pastes cleanly into Outlo
     description, recommended action and required documentation
   • the previously reported NCRs listed as corrected in the Executive Summary
 
-Where the details come from, per NCR (first one found wins, field by field):
-  1. its "Non-Conformance Observation <id>" detail page,
-  2. the "Non-conformance Observations" list (Summary of Observations / General Observations),
-  3. the "Action Items" list (recommended actions only).
+Where the details come from: each NCR's "Non-Conformance Observation <id>" ticket page only.
+The end-of-report summary and Action Items lists are not read (reports no longer include a
+non-conformance summary), so an NCR without a ticket page isn't in the email.
 
 check_notes() lists things worth a second look before sending (shown in the app, never
 in the email), e.g. an Executive Summary NCN number that doesn't match the report.
@@ -52,7 +51,7 @@ class NcrItem:
     floor: str = ""
     elevation: str = ""
     grid_lines: str = ""
-    sources: list = field(default_factory=list)   # "detail page", "summary list", "action items"
+    sources: list = field(default_factory=list)   # "detail page"
 
     @property
     def location(self) -> str:
@@ -204,7 +203,7 @@ def extract_summary(pdf_bytes: bytes) -> ReportSummary:
     def item(ncr_id: str) -> NcrItem:
         return items.setdefault(ncr_id, NcrItem(id=ncr_id))
 
-    # 1. Detail pages
+    # Non-Conformance Observation ticket pages
     for i, line in enumerate(lines):
         m = re.match(r"^[A-Z]\.\s+Non-Conformance Observation\s+(" + NCR_ID + r")", line.replace(" .", "."))
         if not m:
@@ -219,54 +218,9 @@ def extract_summary(pdf_bytes: bytes) -> ReportSummary:
                 setattr(it, attr, fields[label])
         it.sources.append("detail page")
 
-    # 2. "Non-conformance Observations:" lists (with optional "Recommended Action(s):")
-    for i, line in enumerate(lines):
-        if not line.lower().startswith("non-conformance observations"):
-            continue
-        block = _section_after(lines, i, stops=("Work-in-Progress Observations", "General Observations"))
-        _read_id_list(block, item, "summary list", with_actions=True)
-
-    # 3. Action Items list
-    for i, line in enumerate(lines):
-        if re.match(r"^[A-Z]\.\s+Action Items", line):
-            block = _section_after(lines, i, stops=("I certify", "Notice:", "Signed:"))
-            _read_id_list(block, item, "action items", with_actions=False)
-
+    # Only the ticket pages are used; summary / Action Items lists are not read.
     s.items = sorted(items.values(), key=lambda it: _sort_key(it.id))
     return s
-
-
-def _read_id_list(block, item, source, with_actions):
-    """Lines like '67.NC.1 description …' [+ 'Recommended Action(s):' …] into items."""
-    current, part, buf = None, "description", {"description": [], "action": []}
-
-    def flush():
-        if current is None:
-            return
-        it = item(current)
-        desc, act = _clean(" ".join(buf["description"])), _clean(" ".join(buf["action"]))
-        if with_actions:
-            if desc and not it.description:
-                it.description = desc
-            if act and not it.recommended_action:
-                it.recommended_action = act
-        elif desc and not it.recommended_action:     # Action Items: the text is the action
-            it.recommended_action = desc
-        if source not in it.sources:
-            it.sources.append(source)
-
-    for line in block:
-        m = re.match(r"^(" + NCR_ID + r")\s*(.*)$", line)
-        if m:
-            flush()
-            current, part, buf = m.group(1), "description", {"description": [m.group(2)], "action": []}
-        elif current and re.match(r"^Recommended Action\(?s?\)?\s*:", line):
-            part = "action"
-            rest = line.split(":", 1)[1]
-            buf["action"].append(rest)
-        elif current:
-            buf[part].append(line)
-    flush()
 
 
 # ----------------------------------------------------------------------------- checks
@@ -278,14 +232,15 @@ def check_notes(s: ReportSummary) -> list[str]:
         msg = f"The Executive Summary lists {', '.join(s.observed_ids)} as observed"
         if found:
             msg += f", but the report's non-conformances are {', '.join(found)}"
-        notes.append(msg + ". The email uses the non-conformances found in the report body.")
+        notes.append(msg + ". The email uses the non-conformance ticket pages in the report.")
     if s.inspection_date and s.visit_date and s.inspection_date != s.visit_date:
         notes.append(f"The report's Inspection Date is {s.inspection_date}, but the description says the "
                      f"site was visited on {s.visit_date}. The opening sentence uses the Inspection Date; "
                      "edit it if the visit date is the right one.")
     if s.observed_flag.lower().startswith("no") and found:
         notes.append("The Executive Summary says no non-conformances were observed, "
-                     f"but the report body has {len(found)}.")
+                     f"but the report has {len(found)} non-conformance ticket page"
+                     f"{'s' if len(found) != 1 else ''}.")
     if s.report_no:
         stray = [it.id for it in s.items if it.id.split(".")[0] != s.report_no]
         if stray:
@@ -299,15 +254,11 @@ def check_notes(s: ReportSummary) -> list[str]:
         if len(ids) > 1:
             notes.append(f"{', '.join(ids)} have the same Recommended Action word for word. "
                          "Check it wasn't copied over by mistake.")
-    no_detail = [it.id for it in s.items if "detail page" not in it.sources]
-    if no_detail:
-        one = len(no_detail) == 1
-        notes.append(f"{', '.join(no_detail)} {'has' if one else 'have'} no Non-Conformance Observation "
-                     f"page in the report, so the email shows only {'its' if one else 'their'} description"
-                     " and recommended action from the summary.")
     for it in s.items:
         if not it.description:
-            notes.append(f"{it.id} has no description in the report.")
+            notes.append(f"{it.id} has no description on its ticket page.")
+        if not it.recommended_action:
+            notes.append(f"{it.id} has no recommended action on its ticket page.")
     return notes
 
 
