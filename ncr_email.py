@@ -323,6 +323,18 @@ class EmailWording:
     include_corrected: bool = True
 
 
+def _with_weekday(date_text: str) -> str:
+    """"11/10/2026" -> "Tuesday, 11/10/2026". Left as written if it isn't a recognisable date."""
+    from datetime import datetime
+    text = (date_text or "").strip()
+    for fmt in ("%m/%d/%Y", "%m/%d/%y", "%m-%d-%Y", "%m.%d.%Y", "%Y-%m-%d"):
+        try:
+            return f"{datetime.strptime(text, fmt):%A}, {text}"
+        except ValueError:
+            continue
+    return text
+
+
 def default_intro(s: ReportSummary) -> str:
     report = f"Special Inspection Report #{s.report_no}" if s.report_no else "the attached special inspection report"
     when = f" on {s.inspection_date}" if s.inspection_date else ""
@@ -330,9 +342,10 @@ def default_intro(s: ReportSummary) -> str:
         return (f"No non-conformances were observed during TT's special inspection{when}, "
                 f"as documented in {report}. The full report is attached for reference.")
     kind = s.inspection_type or "Special Inspection"
-    report = f"{kind} Report #{s.report_no}" if s.report_no else f"the attached {kind.lower()} report"
-    return (f"Please see below a summary of the non-conformances observed during TT's {kind.lower()}"
-            f"{when} as documented in {report}. The full report and NCR log is attached for reference.")
+    report = f"the attached {kind} Report #{s.report_no}" if s.report_no else f"the attached {kind.lower()} report"
+    visit = f" on {_with_weekday(s.inspection_date)}" if s.inspection_date else ""
+    return (f"Please find {report} and associated NCR log for TT's visit{visit}. Documented below is a "
+            f"summary of the non-conformances observed during TT's {kind.lower()}.")
 
 
 def subject_line(s: ReportSummary) -> str:
