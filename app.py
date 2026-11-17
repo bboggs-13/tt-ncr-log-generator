@@ -833,7 +833,7 @@ def render_captions():
              "page is checked against the original before it is used.",
     )
 
-    st.subheader("4. Generate captioned PDF")
+    st.subheader("4. Generate Post-Processed Report")
     if st.button("Apply captions", type="primary",
                  help="Captions are left-aligned under each photo. If any caption needs a smaller "
                       "font to clear the next photo row, every caption uses that same size."):
