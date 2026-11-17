@@ -31,13 +31,15 @@ class CloseoutLogFilterTests(unittest.TestCase):
     def test_closed_items_are_hidden_but_kept(self):
         wb, ws, n = self._sheet(_sample_csv())
         start = engine.DATA_START_ROW
-        status = {r: ws[f"G{r}"].value for r in range(start, start + n)}
+        profile = engine.get_profile("special_closeout")
+        status_letter = profile.column_map["Status"]
+        status = {r: ws[f"{status_letter}{r}"].value for r in range(start, start + n)}
         hidden = {r for r in status if ws.row_dimensions[r].hidden}
         self.assertEqual(len(status), 6)   # every item is still in the log
         self.assertEqual({status[r].lower() for r in hidden}, {"closed", "close"})
         self.assertEqual({status[r] for r in status if r not in hidden}, {"Open", "In Progress"})
         filter_column = ws.auto_filter.filterColumn[0]
-        self.assertEqual(filter_column.colId, 6)   # Status column
+        self.assertEqual(filter_column.colId, profile.status_col - 1)   # Status column
         rules = filter_column.customFilters.customFilter
         self.assertEqual({(f.operator, f.val) for f in rules}, {("notEqual", "Closed"), ("notEqual", "Close")})
 
