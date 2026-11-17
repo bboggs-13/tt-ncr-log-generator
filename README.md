@@ -1,4 +1,4 @@
-[README.md](https://github.com/user-attachments/files/34589744/README.md)
+[README.md](https://github.com/user-attachments/files/34985529/README.md)
 # Site Visit Post-Processing Tools
 
 A Thornton Tomasetti web app for finishing PlanRadar site visit outputs. After the title, the app asks **What would you like to do?** and runs one of two tools:
@@ -30,10 +30,32 @@ Engines: `caption_engine.py` (captions, photo order, signatures) and `section_bo
 ## What it does automatically
 
 * Copies the master template (`assets/TTFE_Template.xlsx`) — the master is never modified
-* Writes 11 CSV columns into template columns A–K starting at row 8
+* Special Inspections NCR logs (Standard, Time Sensitive, Project Closeout) use these columns, starting at row 8:
+
+  | Column | CSV column |
+  |---|---|
+  | Report | Report # |
+  | NCR # | Non-Conformance # |
+  | Observation Date | Observation Date |
+  | Status | Status |
+  | Type (Project Closeout log only) | Type |
+  | Floor | Floor |
+  | Responsible Subcontractor | Responsible Subcontractor |
+  | Title | Title |
+  | Description | Description |
+  | Recommended Action | Recommended Action |
+  | Documentation Required | Required Documentation |
+  | Remarks | Updates (or Remarks in older exports) |
+  | Date Closed | Date Closed |
+  | Link to ticket | Link to ticket (only with PlanRadar access) |
+
+  Priority is not shown. Older exports without Floor, Responsible Subcontractor, Title or
+  Required Documentation still work; those columns are left blank and the app says so.
+* Regular Site Inspection logs keep their own columns (Report, Item, Observation Date, Responsible Party, Description, Recommended Action, Status, Remarks, Date Closed)
 * Sets the project name (A4) and today's date (C5)
-* Highlights the Status cell: Open = `#BDD7EE`, Closed = `#C6E0B4`
-* Centers Report #, Item, Observation Date, Status, Date Closed, Link to ticket (plus Type on the Project Closeout log)
+* Highlights the Status cell: Open = `#BDD7EE`, In Progress = `#FFE699`, Closed = `#C6E0B4`
+* Centres the short columns (Report, NCR #, Observation Date, Status, Type, Floor, Responsible Subcontractor, Date Closed, Link to ticket); long-text columns are left aligned and wrapped
+* Log PDF: landscape with 0.5 in margins — 11x17 for the Special Inspections NCR logs, US Letter for the Site Inspection logs
 * Places one 3-inch TT logo in the top corner
 * Adds an Import Audit sheet
 * Time Sensitive logs: **Generate summary PDF** button at the bottom of the app — a one-page TT-style summary (project, date of distribution, open items in each age category: &lt;30, 30–59, 60–89, 90+ days) using the same rules as the log highlighting
