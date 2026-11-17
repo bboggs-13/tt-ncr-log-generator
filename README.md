@@ -1,4 +1,4 @@
-[README.md](https://github.com/user-attachments/files/34993725/README.md)
+[README.md](https://github.com/user-attachments/files/34993995/README.md)
 # Site Visit Post-Processing Tools
 
 A Thornton Tomasetti web app for finishing PlanRadar site visit outputs. After the title, the app asks **What would you like to do?** and runs one of two tools:
@@ -22,7 +22,7 @@ A Thornton Tomasetti web app for finishing PlanRadar site visit outputs. After t
 * Observation type and number are set once per observation; each photo's description can be edited
 * Optional: section borders, spacing clean-up and signatures
 * The original PDF is never overwritten
-* **Non-conformance summary email** (after the captioned PDF is ready): a ready-to-send email built from the report — subject line plus, for each non-conformance, its subject, status, responsible contractor, location, description, recommended action and required documentation, and the corrected items from the Executive Summary
+* **Non-conformance summary email** (after the post-processed report is ready): a ready-to-send email built from the report — subject line plus, for each non-conformance, its subject, status, responsible contractor, location, description, recommended action and required documentation, and the corrected items from the Executive Summary
   * **Copy email** copies it with its formatting for pasting into Outlook; **Copy subject** copies the subject line; **Download as Outlook draft (.eml)** opens as a new unsent message in Outlook for Windows/Mac
   * Details come from each NCR's "Non-Conformance Observation" page first, then the Summary of Observations / General Observations list, then Action Items
   * **Check before sending** lists report issues it spotted (e.g. an Executive Summary NCN # that doesn't match the report, identical recommended actions, NCRs without a detail page). These are never put in the email
