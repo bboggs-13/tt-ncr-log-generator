@@ -27,6 +27,8 @@ from openpyxl.worksheet.datavalidation import DataValidation
 from openpyxl.utils import column_index_from_string, get_column_letter
 from openpyxl.formatting.rule import FormulaRule
 
+ENGINE_VERSION = "2026-11-17.2"   # app.py checks this, so a stale engine.py can't produce a mixed-up log
+
 ASSETS = Path(__file__).parent / "assets"
 LOGO_PATH = ASSETS / "tt_logo.png"
 
@@ -70,7 +72,8 @@ CLOSED_BANDS = (
     (60, 90, "60–90 days ago", "#E2EFDA"),
 )
 CLOSED_TOTAL = (0, 90, "Total, last 90 days", "#A9D08E")
-TEXT_FIELDS = ("Description", "Recommended Action", "Remarks")  # left + vertically centered
+TEXT_FIELDS = ("Title", "Description", "Recommended Action", "Required Documentation",
+               "Remarks")  # left + vertically centered
 CLOSED_WORDS = ("closed", "close")
 
 
@@ -106,6 +109,26 @@ ALIASES = {
     "Type": ["NCR Type", "Type of NCR", "Category"],
     "Responsible Party": ["Responsible", "Party Responsible", "Responsible party",
                           "Trade", "Contractor", "Assigned to"],
+    "Responsible Subcontractor": ["Responsible Sub", "Subcontractor", "Responsible Contractor",
+                                  "Responsible Party", "Responsible"],
+    "Floor": ["Level", "Floor / Level", "Floor/Level"],
+    "Required Documentation": ["Documentation Required", "Documentation", "Documents Required"],
+    "Remarks": ["Updates", "Update", "Comments"],   # newer PlanRadar exports call it Updates
+}
+
+
+# Column titles written to the header row (row 7). The engine writes these itself, so the
+# titles always sit over the data they describe, whatever the template's row 7 says.
+COLUMN_TITLES = {
+    "Report #": "Report", "Non-Conformance #": "NCR #",
+    "Required Documentation": "Documentation Required",
+}
+# Column widths (Excel character units) for the Special Inspections logs.
+SPECIAL_WIDTHS = {
+    "Report #": 8.86, "Non-Conformance #": 12.0, "Observation Date": 21.0, "Status": 8.86,
+    "Type": 10.0, "Floor": 16.0, "Responsible Subcontractor": 28.0, "Title": 40.0,
+    "Description": 81.29, "Recommended Action": 72.57, "Required Documentation": 40.0,
+    "Remarks": 69.0, "Date Closed": 17.29, "Link to ticket": 67.86,
 }
 
 
@@ -123,8 +146,10 @@ class Profile:
     type_highlight: bool = False  # Project Closeout: shade rows by NCR Type
     status_colors: bool = True    # blue/yellow/green Status-cell colours (off when rows are shaded)
     filter_open: bool = True      # every log opens pre-filtered to non-Closed items
-    legend_cols: tuple = ("E", "F")  # legend: (swatch column, label column)
+    legend_cols: tuple = ("E", "F")  # legend: (swatch column, label column[, last label column])
     ui_note: str = ""             # short explanation shown in the app
+    titles: dict = field(default_factory=dict)   # header-title overrides for this log
+    widths: dict = field(default_factory=dict)   # column widths by field (else the template's)
 
 
 _AGE_NOTE = ("Open items are shaded across the whole row by days since the Observation Date, "
@@ -133,14 +158,17 @@ _AGE_NOTE = ("Open items are shaded across the whole row by days since the Obser
 _FILTER_NOTE = ("The log opens showing open items only. Closed items are still in the log — "
                 "choose Select All in the Status filter to show them.")
 
-# Special Inspections columns (Type and Priority removed)
+# Special Inspections columns (Priority not shown; Type only in the Closeout log).
+# Column titles come from the templates ("Non-Conformance #" is headed "NCR #",
+# "Required Documentation" is headed "Documentation Required").
 _SPECIAL_MAP = {
-    "Report #": "A", "Non-Conformance #": "B", "Observation Date": "C",
-    "Description": "D", "Recommended Action": "E", "Status": "F",
-    "Remarks": "G", "Date Closed": "H", "Link to ticket": "I",
+    "Report #": "A", "Non-Conformance #": "B", "Observation Date": "C", "Status": "D",
+    "Floor": "E", "Responsible Subcontractor": "F", "Title": "G", "Description": "H",
+    "Recommended Action": "I", "Required Documentation": "J", "Remarks": "K",
+    "Date Closed": "L", "Link to ticket": "M",
 }
 _SPECIAL_REQ = ["Report #", "Non-Conformance #", "Observation Date", "Status"]
-_SPECIAL_CENTER = [1, 2, 3, 6, 8, 9]
+_SPECIAL_CENTER = [1, 2, 3, 4, 5, 6, 12, 13]
 
 _REGULAR_MAP = {
     "Report #": "A", "Non-Conformance #": "B", "Observation Date": "C",
@@ -153,40 +181,45 @@ _REGULAR_CENTER = [1, 2, 3, 4, 7, 9]
 
 PROFILES = {
     "special": Profile(
+        widths=SPECIAL_WIDTHS,
         key="special",
         label="Special Inspections",
         template="TTFE_Template.xlsx",
         column_map=_SPECIAL_MAP, required_columns=_SPECIAL_REQ,
-        center_columns=_SPECIAL_CENTER, status_col=6, last_col=9,
+        center_columns=_SPECIAL_CENTER, status_col=4, last_col=13,
         ui_note=_FILTER_NOTE,
     ),
     "special_time": Profile(
+        widths=SPECIAL_WIDTHS,
         key="special_time",
         label="Special Inspections — Time Sensitive NCR Log",
         template="TTFE_Template_TimeSensitive.xlsx",
         column_map=_SPECIAL_MAP, required_columns=_SPECIAL_REQ,
-        center_columns=_SPECIAL_CENTER, status_col=6, last_col=9,
+        center_columns=_SPECIAL_CENTER, status_col=4, last_col=13,
         age_highlight=True, status_colors=False, filter_open=True,
-        legend_cols=("F", "G"),  # narrow Status column holds the swatches
+        legend_cols=("D", "E", "G"),  # swatches in the narrow Status column, labels across E:G
         ui_note=_AGE_NOTE + " " + _FILTER_NOTE,
     ),
     "special_closeout": Profile(
+        widths=SPECIAL_WIDTHS,
         key="special_closeout",
         label="Special Inspections — Project Closeout NCR Log",
         template="TTFE_Template_Closeout.xlsx",
         column_map={
-            "Report #": "A", "Non-Conformance #": "B", "Observation Date": "C",
-            "Type": "D", "Description": "E", "Recommended Action": "F",
-            "Status": "G", "Remarks": "H", "Date Closed": "I", "Link to ticket": "J",
+            "Report #": "A", "Non-Conformance #": "B", "Observation Date": "C", "Status": "D",
+            "Type": "E", "Floor": "F", "Responsible Subcontractor": "G", "Title": "H",
+            "Description": "I", "Recommended Action": "J", "Required Documentation": "K",
+            "Remarks": "L", "Date Closed": "M", "Link to ticket": "N",
         },
         required_columns=["Report #", "Non-Conformance #", "Observation Date", "Type", "Status"],
-        center_columns=[1, 2, 3, 4, 7, 9, 10], status_col=7, last_col=10,
+        center_columns=[1, 2, 3, 4, 5, 6, 7, 13, 14], status_col=4, last_col=14,
         type_highlight=True, status_colors=False, filter_open=True,
-        legend_cols=("D", "E"),
+        legend_cols=("D", "E", "G"),  # swatches in the narrow Status column, labels across E:G
         ui_note=("Rows are shaded by NCR Type in pastel colours: TR-1 green · TR-8 terracotta · "
                  "QA/QC dark blue. Other or blank types are not shaded. " + _FILTER_NOTE),
     ),
     "regular": Profile(
+        titles={"Non-Conformance #": "Item"},
         key="regular",
         label="Regular Site Inspections",
         template="TTFE_Template_Regular.xlsx",
@@ -195,6 +228,7 @@ PROFILES = {
         ui_note=_FILTER_NOTE,
     ),
     "regular_time": Profile(
+        titles={"Non-Conformance #": "Item"},
         key="regular_time",
         label="Regular Site Inspections — Time Sensitive Site Inspection Log",
         template="TTFE_Template_Regular_TimeSensitive.xlsx",
@@ -252,31 +286,63 @@ def with_planradar_link(profile: Profile, include: bool) -> Profile:
     return profile
 
 
-def _fit_link_column(ws, profile: Profile):
-    """Make the template's header row match the profile's link setting."""
-    link = profile.column_map.get(LINK_FIELD)
-    if link:
-        head = ws[f"{link}{HEADER_ROW}"]
-        if head.value != LINK_FIELD:  # template has no link column: style it like its neighbour
-            prev = ws.cell(HEADER_ROW, profile.last_col - 1)
-            head.value = LINK_FIELD
-            for attr in ("font", "fill", "alignment", "border", "number_format", "protection"):
-                setattr(head, attr, copy(getattr(prev, attr)))
-        ws.column_dimensions[link].width = LINK_WIDTH
-    else:
-        col = profile.last_col + 1
-        if ws.cell(HEADER_ROW, col).value == LINK_FIELD:  # template has one: drop it
-            ws.delete_cols(col)
-            ws.column_dimensions.pop(get_column_letter(col), None)
+def _write_header_row(ws, profile: Profile):
+    """Write row 7 from the profile: one title per mapped field, in its own column.
+
+    The data rows are written from the same column_map, so a title can never sit over
+    another field's data, even if the template's own row 7 is out of date. Any header
+    cells to the right of the last column (e.g. a Link to ticket left over in the
+    template when the contractor has no PlanRadar access) are cleared.
+    """
+    proto = copy(ws.cell(HEADER_ROW, 1)._style)
+    for fld, letter in profile.column_map.items():
+        cell = ws[f"{letter}{HEADER_ROW}"]
+        cell._style = copy(proto)
+        cell.value = profile.titles.get(fld, COLUMN_TITLES.get(fld, fld))
+        cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+        width = profile.widths.get(fld) or (LINK_WIDTH if fld == LINK_FIELD else None)
+        if width:
+            ws.column_dimensions[letter].width = width
+    for c in range(profile.last_col + 1, max(ws.max_column, profile.last_col) + 1):
+        cell = ws.cell(HEADER_ROW, c)
+        cell.value = None
+        cell.border = Border()
+        cell.font = Font(name="Arial", size=FONT_SIZE)
+        ws.column_dimensions[get_column_letter(c)].width = 8.43
+
+
+def check_layout(ws, profile: Profile) -> list:
+    """Problems with the written header row (empty list = every column is where it should be)."""
+    problems, seen = [], {}
+    for fld, letter in profile.column_map.items():
+        want = profile.titles.get(fld, COLUMN_TITLES.get(fld, fld))
+        got = ws[f"{letter}{HEADER_ROW}"].value
+        if got != want:
+            problems.append(f"column {letter} is headed {got!r}, expected {want!r}")
+    for c in range(1, ws.max_column + 1):
+        title = ws.cell(HEADER_ROW, c).value
+        if title:
+            seen.setdefault(title, []).append(get_column_letter(c))
+    problems += [f"{t!r} appears in columns {', '.join(cols)}" for t, cols in seen.items() if len(cols) > 1]
+    return problems
+
+
+def _norm(name) -> str:
+    return " ".join(str(name).replace("\ufeff", "").split()).casefold()
 
 
 def _resolve_field(field_name: str, df: pd.DataFrame):
-    """Return the actual CSV column for a logical field, honoring aliases."""
-    if field_name in df.columns:
-        return field_name
-    for alt in ALIASES.get(field_name, []):
-        if alt in df.columns:
-            return alt
+    """Return the actual CSV column for a logical field, honoring aliases.
+
+    Matching ignores case, stray spaces and a byte-order mark, so "Title ", "title" and
+    "\ufeffReport #" all match.
+    """
+    by_norm = {}
+    for col in df.columns:
+        by_norm.setdefault(_norm(col), col)
+    for name in [field_name, *ALIASES.get(field_name, [])]:
+        if _norm(name) in by_norm:
+            return by_norm[_norm(name)]
     return None
 
 
@@ -291,8 +357,13 @@ def _coerce(val):
         return val
 
 
+# How a field is listed in the app's "Expected CSV columns" note, when the current
+# PlanRadar export names it differently from the log field.
+_EXPECTED_NAMES = {"Remarks": "Updates (or Remarks)"}
+
+
 def expected_columns(profile: Profile) -> list:
-    return list(profile.column_map.keys())
+    return [_EXPECTED_NAMES.get(f, f) for f in profile.column_map]
 
 
 def validate(df: pd.DataFrame, profile: Profile):
@@ -310,8 +381,12 @@ def validate(df: pd.DataFrame, profile: Profile):
     unknown = [c for c in df.columns if c not in mapped and c != LINK_FIELD]
     if unknown:
         msgs.append(f"Note: unmapped columns will be ignored: {', '.join(unknown)}")
-    if LINK_FIELD in profile.column_map and _resolve_field(LINK_FIELD, df) is None:
-        msgs.append(f"Note: no '{LINK_FIELD}' column in the CSV, so the link column is left blank.")
+    absent = [f for f in profile.column_map
+              if f not in profile.required_columns and _resolve_field(f, df) is None]
+    if absent:
+        names = ", ".join(f"'{f}'" for f in absent)
+        msgs.append(f"Note: the CSV has no {names} column(s); "
+                    f"{'that column is' if len(absent) == 1 else 'those columns are'} left blank.")
     ok = not missing and not df.empty
     return ok, msgs
 
@@ -404,13 +479,16 @@ def _write_legend(ws, profile, title, rows):
     Column pair comes from Profile.legend_cols; fills come from the same constants
     as the highlighting rules, so the key always matches the rows.
     """
-    sw_col, lab_col = profile.legend_cols
+    sw_col, lab_col, *rest = profile.legend_cols
+    lab_end = rest[0] if rest else lab_col
+    lab_cols = range(column_index_from_string(lab_col), column_index_from_string(lab_end) + 1)
     head = ws[f"{sw_col}1"]
     head.value = title
     head.font = Font(name="Arial", size=10, bold=True)
     head.alignment = Alignment(horizontal="left", vertical="center")
-    head.border = THIN_BORDER
-    ws.merge_cells(f"{sw_col}1:{lab_col}1")
+    for c in range(column_index_from_string(sw_col), lab_cols[-1] + 1):
+        ws.cell(1, c).border = THIN_BORDER
+    ws.merge_cells(f"{sw_col}1:{lab_end}1")
 
     for r, (text, fill) in enumerate(rows, start=2):
         swatch, label = ws[f"{sw_col}{r}"], ws[f"{lab_col}{r}"]
@@ -420,7 +498,10 @@ def _write_legend(ws, profile, title, rows):
         label.value = text
         label.font = Font(name="Arial", size=10)
         label.alignment = Alignment(horizontal="left", vertical="center")
-        label.border = THIN_BORDER
+        for c in lab_cols:
+            ws.cell(r, c).border = THIN_BORDER
+        if len(lab_cols) > 1:
+            ws.merge_cells(f"{lab_col}{r}:{lab_end}{r}")
 
 
 # ---------------------------------------------------------------- summary sheet
@@ -625,7 +706,7 @@ def build_workbook(df: pd.DataFrame, profile: Profile, project_name: str = "134 
     ws = wb.worksheets[0]
     ws.title = SHEET_TITLES.get(profile.key, "Log")
     ws._images = []  # we place exactly one logo
-    _fit_link_column(ws, profile)
+    _write_header_row(ws, profile)
 
     first_col, last_col = 1, profile.last_col
     status_col = profile.status_col
@@ -651,7 +732,7 @@ def build_workbook(df: pd.DataFrame, profile: Profile, project_name: str = "134 
             cell = ws.cell(r, c)
             al = copy(cell.alignment)
             cell.alignment = Alignment(horizontal="center", vertical="center",
-                                       wrap_text=al.wrap_text, text_rotation=al.text_rotation,
+                                       wrap_text=True, text_rotation=al.text_rotation,
                                        indent=al.indent)
 
     # Text columns: left aligned, vertically centered, wrapped
@@ -742,9 +823,27 @@ def build_workbook(df: pd.DataFrame, profile: Profile, project_name: str = "134 
         audit[f"A{idx}"] = k
         audit[f"B{idx}"] = v
 
+    problems = check_layout(ws, profile)
+    if problems:   # never hand out a log whose titles don't match its data
+        raise ValueError("Log columns didn't line up: " + "; ".join(problems))
+
     buf = io.BytesIO()
     wb.save(buf)
     return buf.getvalue()
+
+
+def read_csv(csv_bytes: bytes) -> pd.DataFrame:
+    """Read a PlanRadar CSV export as text. Handles UTF-8 (with or without a byte-order
+    mark) and Windows-1252 exports, and trims stray spaces from column names."""
+    for encoding in ("utf-8-sig", "cp1252", "latin-1"):
+        try:
+            df = pd.read_csv(io.BytesIO(csv_bytes), dtype=str, encoding=encoding,
+                             keep_default_na=False)
+            break
+        except UnicodeDecodeError:
+            continue
+    df.columns = [" ".join(str(c).replace("\ufeff", "").split()) for c in df.columns]
+    return df.fillna("")
 
 
 def process_csv_bytes(csv_bytes: bytes, inspection_type: str = DEFAULT_PROFILE,
@@ -754,7 +853,7 @@ def process_csv_bytes(csv_bytes: bytes, inspection_type: str = DEFAULT_PROFILE,
     planradar_access: True adds the PlanRadar "Link to ticket" column, False leaves it out.
     """
     profile = with_planradar_link(get_profile(inspection_type), planradar_access)
-    df = pd.read_csv(io.BytesIO(csv_bytes), dtype=str).fillna("")
+    df = read_csv(csv_bytes)
     ok, msgs = validate(df, profile)
     if not ok:
         return None, df, msgs
