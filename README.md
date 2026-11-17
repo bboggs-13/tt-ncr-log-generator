@@ -1,4 +1,4 @@
-[README.md](https://github.com/user-attachments/files/34985529/README.md)
+[README.md](https://github.com/user-attachments/files/34990341/README.md)
 # Site Visit Post-Processing Tools
 
 A Thornton Tomasetti web app for finishing PlanRadar site visit outputs. After the title, the app asks **What would you like to do?** and runs one of two tools:
@@ -52,6 +52,7 @@ Engines: `caption_engine.py` (captions, photo order, signatures) and `section_bo
   Priority is not shown. Older exports without Floor, Responsible Subcontractor, Title or
   Required Documentation still work; those columns are left blank and the app says so.
 * Regular Site Inspection logs keep their own columns (Report, Item, Observation Date, Responsible Party, Description, Recommended Action, Status, Remarks, Date Closed)
+* The engine writes the column titles (row 7) itself from the same mapping it uses for the data, and checks them before saving, so a title can never sit over another column's data. `app.py` and `engine.py` carry matching version numbers (shown under the downloads as "NCR log engine …"); if they don't match, the app stops and asks you to upload both and reboot
 * Sets the project name (A4) and today's date (C5)
 * Highlights the Status cell: Open = `#BDD7EE`, In Progress = `#FFE699`, Closed = `#C6E0B4`
 * Centres the short columns (Report, NCR #, Observation Date, Status, Type, Floor, Responsible Subcontractor, Date Closed, Link to ticket); long-text columns are left aligned and wrapped
