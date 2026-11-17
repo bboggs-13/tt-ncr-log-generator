@@ -93,9 +93,12 @@ class EmailTests(unittest.TestCase):
         s.corrected_ids = ["3.NC.1"]
         self.assertEqual(s.inspection_type, "Special Inspection")
         self.assertEqual(ne.default_intro(s),
-                         "Please see below a summary of the non-conformances observed during TT's special "
-                         "inspection on 01/02/2026 as documented in Special Inspection Report #12. "
-                         "The full report and NCR log is attached for reference.")
+                         "Please find the attached Special Inspection Report #12 and associated NCR log for "
+                         "TT's visit on Friday, 01/02/2026. Documented below is a summary of the "
+                         "non-conformances observed during TT's special inspection.")
+        self.assertEqual(ne._with_weekday("11/10/2026"), "Tuesday, 11/10/2026")
+        self.assertEqual(ne._with_weekday("10/30/26"), "Friday, 10/30/26")
+        self.assertEqual(ne._with_weekday("TBD"), "TBD")
         em = ne.build_email(s, ne.EmailWording(greeting="Hi Sal,", intro="Custom intro.", closing="",
                                                sign_off="Best,", include_corrected=False))
         self.assertTrue(em.text.startswith("Hi Sal,\n\nCustom intro."))
