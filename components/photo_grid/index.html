@@ -1,6 +1,6 @@
 <!DOCTYPE html>
 <!-- TT photo grid: drag-and-drop photo reordering for the Streamlit app.
-     PHOTO_GRID_VERSION 2026-11-17.1  (app.py checks this string)
+     PHOTO_GRID_VERSION 2026-11-17.2  (app.py checks this string)
      Plain HTML/JS Streamlit component (no build step). It receives the photos in their
      current order and sends back {version, order} after a move. -->
 <html>
@@ -8,13 +8,15 @@
 <meta charset="utf-8">
 <style>
   :root { --primary:#004050; --text:#262730; --bg:#ffffff; --bg2:#f0f2f6; --font:"Source Sans Pro", Arial, sans-serif; }
-  html, body { margin:0; padding:0; background:transparent; color:var(--text); font-family:var(--font); }
+  html, body { margin:0; padding:0; background:transparent; color:var(--text); font-family:var(--font);
+               overflow:hidden; height:auto; }
+  #wrap { padding:2px 2px 6px; }
   #hint { font-size:13px; opacity:0.75; margin:0 0 6px 0; }
-  #grid { display:grid; gap:10px; padding:2px; }
-  .tile { position:relative; border:2px solid transparent; border-radius:8px; background:var(--bg2);
+  #grid { display:grid; gap:10px; max-width:var(--maxw, 520px); }
+  .tile { position:relative; aspect-ratio:4 / 3; border:2px solid transparent; border-radius:8px; background:var(--bg2);
           overflow:hidden; cursor:grab; touch-action:none; user-select:none; -webkit-user-select:none;
           outline:none; transition:transform .12s ease, opacity .12s ease, border-color .12s ease; }
-  .tile img { display:block; width:100%; height:auto; pointer-events:none; -webkit-user-drag:none; }
+  .tile img { display:block; width:100%; height:100%; object-fit:contain; pointer-events:none; -webkit-user-drag:none; }
   .tile:focus-visible { border-color:var(--primary); }
   .tile.dragging { opacity:0.35; }
   .tile.target { border-color:var(--primary); transform:scale(0.97); }
@@ -30,15 +32,34 @@
 </style>
 </head>
 <body>
+<div id="wrap">
 <div id="hint">Drag a photo onto another position to move it; the other photos shift along. (Or select a photo and use the arrow keys.)</div>
 <div id="grid" role="list"></div>
+</div>
 <script>
 "use strict";
 // ---- Streamlit component protocol (same messages as streamlit-component-lib) ----
 function send(type, data) {
   window.parent.postMessage(Object.assign({ isStreamlitMessage: true, type: type }, data), "*");
 }
-function setHeight() { send("streamlit:setFrameHeight", { height: document.documentElement.scrollHeight + 4 }); }
+// Height of the grid's own content (not the frame), sent only when it actually changes.
+// Tiles have a fixed 4:3 shape, so the height is known before the photos finish loading.
+let lastHeight = -1, heightQueued = false;
+function nextHeight(content, last) {
+  const h = Math.ceil(content);
+  return h > 0 && Math.abs(h - last) >= 1 ? h : null;
+}
+function setHeight() {
+  if (heightQueued || typeof document === "undefined") return;
+  heightQueued = true;
+  requestAnimationFrame(() => {
+    heightQueued = false;
+    const h = nextHeight(document.getElementById("wrap").getBoundingClientRect().height, lastHeight);
+    if (h === null) return;
+    lastHeight = h;
+    send("streamlit:setFrameHeight", { height: h });
+  });
+}
 
 // ---- pure helpers (also unit-tested in Node) ----
 function moveItem(order, from, to) {
@@ -48,7 +69,7 @@ function moveItem(order, from, to) {
   out.splice(to, 0, item);
   return out;
 }
-if (typeof module !== "undefined") { module.exports = { moveItem }; }
+if (typeof module !== "undefined") { module.exports = { moveItem, nextHeight }; }
 
 // ---- state ----
 let photos = [], columns = 2, version = 0, dragging = null;
@@ -65,6 +86,7 @@ function commit(newOrderIdx) {
 
 function draw(focusIndex) {
   grid.style.gridTemplateColumns = "repeat(" + columns + ", minmax(0, 1fr))";
+  grid.style.setProperty("--maxw", (columns * 260) + "px");
   grid.innerHTML = "";
   photos.forEach((p, i) => {
     const tile = document.createElement("div");
@@ -76,7 +98,6 @@ function draw(focusIndex) {
     tile.title = p.orig !== i + 1 ? "Originally photo " + p.orig : "Photo " + (i + 1);
     const img = document.createElement("img");
     img.src = p.src; img.alt = ""; img.draggable = false;
-    img.addEventListener("load", setHeight);
     const badge = document.createElement("div");
     badge.className = "badge"; badge.textContent = String(i + 1);
     tile.append(img, badge);
@@ -190,7 +211,7 @@ if (typeof window !== "undefined" && grid) {
       ? Number(document.activeElement.dataset.index) : undefined;
     if (!sameOrder || grid.children.length !== photos.length) draw(focused); else setHeight();
   });
-  if (window.ResizeObserver) new ResizeObserver(setHeight).observe(document.body);
+  if (window.ResizeObserver) new ResizeObserver(setHeight).observe(document.getElementById("wrap"));
   send("streamlit:componentReady", { apiVersion: 1 });
 }
 </script>
