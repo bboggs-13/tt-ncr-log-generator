@@ -43,24 +43,22 @@ class ExtractTests(unittest.TestCase):
     def test_synthetic_report(self):
         s = ne.extract_summary(SYNTH)
         self.assertEqual((s.project, s.report_no, s.inspection_date), ("Sample Tower", "12", "01/02/2026"))
-        self.assertEqual([it.id for it in s.items], ["12.NC.1", "12.NC.2"])
-        one, two = s.items
+        self.assertEqual([it.id for it in s.items], ["12.NC.1"])     # 12.NC.2 is only in the summary
+        one = s.items[0]
         self.assertEqual(one.subject, "Missing end dams")
         self.assertEqual(one.contractor, "Glazing Sub <A&B>")
         self.assertEqual(one.description, "End dams were not installed at the sill flashing.")
         self.assertEqual(one.location, "Floor 3, North Elevation")
-        self.assertEqual(two.description, "Sealant joint width below minimum.")
-        self.assertEqual(two.recommended_action, "Remove and replace sealant.")
+        self.assertEqual(one.recommended_action, "Install end dams.")
         self.assertEqual(s.corrected_ids, [])
         notes = ne.check_notes(s)
-        self.assertTrue(any("12.NC.2 has no Non-Conformance Observation page" in n for n in notes))
-        self.assertFalse(any("Executive Summary lists" in n for n in notes))
+        self.assertTrue(any("lists 12.NC.1, 12.NC.2" in n for n in notes))   # exec summary vs ticket pages
 
     @unittest.skipUnless(R67.exists(), "report #67 not available")
     def test_report_67(self):
         s = ne.extract_summary(R67.read_bytes())
         self.assertEqual((s.project, s.report_no), ("134 Jane Street", "67"))
-        self.assertEqual([it.id for it in s.items], ["67.NC.1", "67.NC.2", "67.NC.3", "67.NC.4"])
+        self.assertEqual([it.id for it in s.items], ["67.NC.1"])     # the only ticket page
         first = s.items[0]
         self.assertEqual(first.subject, "Unadhered Insulation Board Behind Aluminum Rainscreen")
         self.assertEqual((first.status, first.contractor), ("Open", "TCS / Airflex"))
@@ -69,13 +67,22 @@ class ExtractTests(unittest.TestCase):
         self.assertEqual(s.corrected_ids, ["22.NC.3", "53.NC.1", "55.NC.1", "58.NC.4"])
         notes = ne.check_notes(s)
         self.assertTrue(any("lists 66.NC.1" in n for n in notes))
-        self.assertTrue(any("same Recommended Action" in n for n in notes))
+
+    @unittest.skipUnless(R67.exists(), "report #67 not available")
+    def test_report_without_summary_section(self):
+        """Reports no longer have a summary at the end: the email must not change."""
+        with_summary = ne.extract_summary(R67.read_bytes())
+        doc = fitz.open(stream=R67.read_bytes(), filetype="pdf")
+        doc.delete_pages(6, 7)                        # E. Summary of Observations
+        without = ne.extract_summary(doc.tobytes())
+        self.assertEqual(ne.build_email(without).text, ne.build_email(with_summary).text)
+        self.assertEqual(without.items[0].description, with_summary.items[0].description)
 
     @unittest.skipUnless(RAW65.exists(), "raw report not available")
     def test_action_items_layout(self):
         s = ne.extract_summary(RAW65.read_bytes())
-        self.assertEqual([it.id for it in s.items], ["65.NC.1", "65.NC.2", "65.NC.3", "65.NC.4"])
-        self.assertIn("action items", s.items[0].sources)
+        self.assertEqual([it.id for it in s.items], ["65.NC.1"])     # Action Items list is not read
+        self.assertEqual(s.items[0].sources, ["detail page"])
 
 
 class EmailTests(unittest.TestCase):
