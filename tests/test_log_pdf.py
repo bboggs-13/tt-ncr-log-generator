@@ -36,18 +36,20 @@ def _pdf(key, rows=SPECIAL, link=True):
 
 
 class LogPdfTests(unittest.TestCase):
-    def test_every_log_type_is_landscape_letter_with_half_inch_margins(self):
+    def test_every_log_type_is_landscape_with_half_inch_margins(self):
+        # Special Inspections NCR logs have too many columns for Letter, so they use 11x17.
         for key in engine.PROFILES:
             with self.subTest(key=key):
                 _x, _p, doc = _pdf(key)
+                w, h = (1224, 792) if key.startswith("special") else (792, 612)
                 for page in doc:
-                    self.assertEqual((page.rect.width, page.rect.height), (792, 612))
+                    self.assertEqual((page.rect.width, page.rect.height), (w, h))
                     drawings = [d["rect"] for d in page.get_drawings()]
                     self.assertAlmostEqual(min(r.x0 for r in drawings), 36, places=1)
-                    self.assertAlmostEqual(max(r.x1 for r in drawings), 756, places=1)
+                    self.assertAlmostEqual(max(r.x1 for r in drawings), w - 36, places=1)
                     blocks = page.get_text("blocks")
                     self.assertGreaterEqual(min(b[1] for b in blocks), 35.5)
-                    self.assertLessEqual(max(b[3] for b in blocks), 612 - 35.5)
+                    self.assertLessEqual(max(b[3] for b in blocks), h - 35.5)
 
     def test_shows_only_the_rows_the_workbook_shows(self):
         _x, _p, doc = _pdf("special")
