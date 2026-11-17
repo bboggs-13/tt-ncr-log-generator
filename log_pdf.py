@@ -6,8 +6,10 @@ Reads the workbook built by engine.build_workbook, so the PDF always matches it:
   • the same colours: Status-cell fills, Time Sensitive age shading, Closeout type shading,
   • the same title block: TT logo, project name, Date Updated and the legend.
 
-Page: US Letter landscape with 0.5 in margins on every side. All columns fit the page
-width; rows continue onto further pages with the column headers repeated. Text is Arial
+Page: landscape with 0.5 in margins on every side — US Letter for logs of up to 10 columns,
+11x17 (Tabloid) for wider logs such as the Special Inspections NCR logs. All columns fit the
+page width; rows continue onto further pages with the column headers repeated, and a row
+taller than a page is split across pages. Text is Arial
 (or Liberation Sans, its metric-identical stand-in, when Arial isn't installed).
 """
 from __future__ import annotations
@@ -21,7 +23,7 @@ from openpyxl import load_workbook
 from openpyxl.utils import get_column_letter
 from reportlab.lib import colors
 from reportlab.lib.enums import TA_CENTER, TA_LEFT
-from reportlab.lib.pagesizes import landscape, letter
+from reportlab.lib.pagesizes import TABLOID, landscape, letter
 from reportlab.lib.styles import ParagraphStyle
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
@@ -31,8 +33,15 @@ from reportlab.platypus import BaseDocTemplate, Frame, Image, PageTemplate, Para
 import engine
 
 PAGE = landscape(letter)                  # 792 x 612 pt
+WIDE_PAGE = landscape(TABLOID)            # 1224 x 792 pt (11x17)
+MAX_LETTER_COLS = 10                      # more columns than this go on 11x17
 MARGIN = 36                               # 0.5 in on all four sides
-CONTENT_W = PAGE[0] - 2 * MARGIN          # 720 pt
+CONTENT_W = PAGE[0] - 2 * MARGIN          # 720 pt on Letter
+
+
+def page_for(n_cols: int) -> tuple[float, float]:
+    """Letter landscape, or 11x17 landscape when the log has too many columns for Letter."""
+    return WIDE_PAGE if n_cols > MAX_LETTER_COLS else PAGE
 FOOTER_H = 14                             # footer sits inside the bottom margin box
 BODY_SIZE, LEADING = 8.0, 9.6
 PAD_X, PAD_Y = 3.0, 2.5
@@ -40,8 +49,10 @@ THIN, THICK = 0.5, 1.5                    # Excel thin / thick borders
 MUTED = colors.HexColor("#6E6E76")
 LOGO_W = 2.25 * 72
 
-FLEX_FIELDS = ("Description", "Recommended Action", "Remarks", engine.LINK_FIELD)
-WRAP_FIELDS = {"Responsible Party": 84.0, "Type": 60.0}   # short fields that may wrap, with a width cap
+FLEX_FIELDS = ("Title", "Description", "Recommended Action", "Required Documentation", "Remarks",
+               engine.LINK_FIELD)
+WRAP_FIELDS = {"Responsible Party": 84.0, "Type": 60.0,   # short fields that may wrap, with a width cap
+               "Floor": 52.0, "Responsible Subcontractor": 64.0}
 LINK_COL_W = 104.0                        # fits "https://www.planradar.com/dr/" per line
 MIN_TEXT_W = 70.0                         # narrowest a text column gets (e.g. an empty Remarks)
 
@@ -148,7 +159,7 @@ def read_log(xlsx_bytes: bytes, profile) -> dict:
         cell_fills.append(status_fill)
 
     legend_title, legend = None, []
-    sw_col, lab_col = profile.legend_cols
+    sw_col, lab_col = profile.legend_cols[:2]
     if profile.age_highlight or profile.type_highlight:
         legend_title = _text(ws[f"{sw_col}1"].value)
         for r in range(2, 7):
@@ -165,7 +176,7 @@ def read_log(xlsx_bytes: bytes, profile) -> dict:
     }
 
 
-def _column_widths(log: dict, font: str, bold: str) -> list[float]:
+def _column_widths(log: dict, font: str, bold: str, content_w: float = CONTENT_W) -> list[float]:
     """Short columns get exactly what their content needs. The link column gets a fixed
     width that fits the PlanRadar address on ~3 lines. The long-text columns share the
     rest by how much text each holds, so the busiest column gets the most room."""
@@ -175,7 +186,9 @@ def _column_widths(log: dict, font: str, bold: str) -> list[float]:
         if field in FLEX_FIELDS and field != engine.LINK_FIELD:
             widths.append(None)
             continue
-        words = log["headers"][i].split() or [""]
+        header = log["headers"][i]
+        # Short headers such as "NCR #" stay on one line; longer ones may wrap at spaces.
+        words = [header] if len(header) <= 8 else (header.split() or [""])
         head = max(sw(w, bold, BODY_SIZE) for w in words) + 2 * PAD_X + 1
         if field == engine.LINK_FIELD:
             widths.append(max(head, LINK_COL_W))
@@ -185,9 +198,9 @@ def _column_widths(log: dict, font: str, bold: str) -> list[float]:
             need = max(need, sw(row[i], font, BODY_SIZE) + 2 * PAD_X + 1)
         widths.append(min(need, max(head, WRAP_FIELDS.get(field, 1e9))))
     flex = [i for i, w in enumerate(widths) if w is None]
-    left = CONTENT_W - sum(w for w in widths if w is not None)
+    left = content_w - sum(w for w in widths if w is not None)
     if not flex:
-        scale = CONTENT_W / sum(widths)
+        scale = content_w / sum(widths)
         return [w * scale for w in widths]
     chars = {i: sum(len(row[i]) for row in log["rows"]) for i in flex}
     weights = {i: (chars[i] ** 0.5 if chars[i] else 0) for i in flex}
@@ -221,7 +234,7 @@ def _para(text: str, style, link: bool = False) -> Paragraph:
     return Paragraph(safe, style)
 
 
-def _title_block(log: dict, st, open_count: int) -> Table:
+def _title_block(log: dict, st, open_count: int, content_w: float = CONTENT_W) -> Table:
     logo_path = engine.LOGO_PATH
     from PIL import Image as PILImage
     w_px, h_px = PILImage.open(logo_path).size
@@ -244,7 +257,7 @@ def _title_block(log: dict, st, open_count: int) -> Table:
             if fill is not None:
                 style.append(("BACKGROUND", (0, r), (0, r), fill))
         right = Table(data, colWidths=[22, 250], style=TableStyle(style), hAlign="RIGHT")
-    block = Table([[left, right]], colWidths=[CONTENT_W - 290, 290],
+    block = Table([[left, right]], colWidths=[content_w - 290, 290],
                   style=TableStyle([("VALIGN", (0, 0), (-1, -1), "TOP"),
                                     ("ALIGN", (1, 0), (1, 0), "RIGHT"),
                                     ("LEFTPADDING", (0, 0), (-1, -1), 0),
@@ -275,10 +288,11 @@ def _log_table(log: dict, st, widths: list[float]) -> Table:
             style.append(("BACKGROUND", (0, r), (-1, r), row_fill))
         if cell_fill is not None:
             style.append(("BACKGROUND", (log["status_i"], r), (log["status_i"], r), cell_fill))
-    return Table(data, colWidths=widths, repeatRows=1, style=TableStyle(style), hAlign="LEFT")
+    return Table(data, colWidths=widths, repeatRows=1, style=TableStyle(style), hAlign="LEFT",
+                 splitInRow=1)  # a row taller than a page continues on the next one
 
 
-def _numbered_canvas(footer_left: str, font: str):
+def _numbered_canvas(footer_left: str, font: str, page_w: float = PAGE[0]):
     class NumberedCanvas(rl_canvas.Canvas):
         def __init__(self, *args, **kwargs):
             super().__init__(*args, **kwargs)
@@ -296,28 +310,30 @@ def _numbered_canvas(footer_left: str, font: str):
                 self.setFillColor(MUTED)
                 base = MARGIN - pdfmetrics.getDescent(font, 7.5)    # text bottom sits on the margin
                 self.drawString(MARGIN, base, footer_left)
-                self.drawRightString(PAGE[0] - MARGIN, base, f"Page {self._pageNumber} of {total}")
+                self.drawRightString(page_w - MARGIN, base, f"Page {self._pageNumber} of {total}")
                 super().showPage()
             super().save()
     return NumberedCanvas
 
 
 def build_log_pdf(xlsx_bytes: bytes, profile) -> bytes:
-    """Landscape US Letter PDF of the log's visible (open) items."""
+    """Landscape PDF (Letter, or 11x17 for wide logs) of the log's visible (open) items."""
     font, bold = _register_fonts()
     log = read_log(xlsx_bytes, profile)
     st = _styles(font, bold)
-    widths = _column_widths(log, font, bold)
+    page = page_for(len(log["headers"]))
+    content_w = page[0] - 2 * MARGIN
+    widths = _column_widths(log, font, bold, content_w)
 
     buf = io.BytesIO()
-    doc = BaseDocTemplate(buf, pagesize=PAGE, leftMargin=MARGIN, rightMargin=MARGIN,
+    doc = BaseDocTemplate(buf, pagesize=page, leftMargin=MARGIN, rightMargin=MARGIN,
                           topMargin=MARGIN, bottomMargin=MARGIN + FOOTER_H,
                           title=f"{log['project']} \u2013 {log['sheet']}", author="Thornton Tomasetti")
     # No frame padding, so the table edges sit exactly on the 0.5 in margins.
-    frame = Frame(MARGIN, MARGIN + FOOTER_H, CONTENT_W, PAGE[1] - 2 * MARGIN - FOOTER_H,
+    frame = Frame(MARGIN, MARGIN + FOOTER_H, content_w, page[1] - 2 * MARGIN - FOOTER_H,
                   leftPadding=0, rightPadding=0, topPadding=0, bottomPadding=0, id="body")
     doc.addPageTemplates([PageTemplate(id="log", frames=[frame])])
-    story = [_title_block(log, st, len(log["rows"])), Spacer(1, 12), _log_table(log, st, widths)]
+    story = [_title_block(log, st, len(log["rows"]), content_w), Spacer(1, 12), _log_table(log, st, widths)]
     footer = f"{log['project']} \u00b7 {log['sheet']} \u00b7 {log['date_label'].rstrip(':') or 'Date Updated'} {log['date']}"
-    doc.build(story, canvasmaker=_numbered_canvas(footer, font))
+    doc.build(story, canvasmaker=_numbered_canvas(footer, font, page[0]))
     return buf.getvalue()
