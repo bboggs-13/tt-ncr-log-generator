@@ -15,6 +15,7 @@ Run locally:   streamlit run app.py
 from pathlib import Path
 _CAPTION_ENGINE_VERSION = "2026-11-09.1"   # must match caption_engine.ENGINE_VERSION
 _NCR_ENGINE_VERSION = "2026-11-17.2"       # must match engine.ENGINE_VERSION
+_NCR_EMAIL_VERSION = "2026-11-17.1"        # must match ncr_email.EMAIL_VERSION
 
 import streamlit as st
 from PIL import Image
@@ -398,6 +399,141 @@ def _reset_photo_order(group_key, original, k):
     _invalidate_captions()
 
 
+_COPY_WIDGET = """<!DOCTYPE html><html><head><style>
+  body { margin:0; font-family: "Source Sans Pro", Arial, sans-serif; }
+  .bar { display:flex; gap:8px; flex-wrap:wrap; margin:0 0 8px 0; }
+  button { font: 600 14px "Source Sans Pro", Arial, sans-serif; padding:6px 14px; border-radius:8px;
+           border:1px solid #c8c8cc; background:#ffffff; color:#262730; cursor:pointer; }
+  button.primary { background:#004050; border-color:#004050; color:#ffffff; }
+  button:hover { filter:brightness(0.95); }
+  #status { font-size:13px; color:#3d7a3d; align-self:center; min-height:1em; }
+  .subject { font: 14px Arial, sans-serif; color:#262730; margin:0 0 8px 0; }
+  .subject b { color:#262730; }
+  #mail { background:#ffffff; color:#000000; border:1px solid #d6d6da; border-radius:6px;
+          padding:14px 16px; max-height:__MAXH__px; overflow-y:auto; }
+</style></head><body>
+<div class="bar">
+  <button class="primary" id="copyBody">Copy email</button>
+  <button id="copySubject">Copy subject</button>
+  <span id="status" role="status"></span>
+</div>
+<div class="subject"><b>Subject:</b> <span id="subj"></span></div>
+<div id="mail"></div>
+<script>
+const DATA = __DATA__;
+document.getElementById("subj").textContent = DATA.subject;
+document.getElementById("mail").innerHTML = DATA.html;
+const status = document.getElementById("status");
+function done(msg) { status.textContent = msg; setTimeout(() => status.textContent = "", 2500); }
+function fallbackCopy(html, text) {
+  // Select a rendered copy and use the browser's copy command (keeps formatting).
+  const box = document.createElement("div");
+  box.contentEditable = "true";
+  box.style.position = "fixed"; box.style.left = "-9999px";
+  if (html) { box.innerHTML = html; } else { box.textContent = text; }
+  document.body.appendChild(box);
+  const range = document.createRange(); range.selectNodeContents(box);
+  const sel = window.getSelection(); sel.removeAllRanges(); sel.addRange(range);
+  let ok = false; try { ok = document.execCommand("copy"); } catch (e) {}
+  sel.removeAllRanges(); box.remove();
+  return ok;
+}
+async function copy(html, text, label) {
+  try {
+    if (html && window.ClipboardItem && navigator.clipboard && navigator.clipboard.write) {
+      await navigator.clipboard.write([new ClipboardItem({
+        "text/html": new Blob([html], {type: "text/html"}),
+        "text/plain": new Blob([text], {type: "text/plain"})})]);
+      return done(label + " copied \u2713");
+    }
+    if (!html && navigator.clipboard && navigator.clipboard.writeText) {
+      await navigator.clipboard.writeText(text);
+      return done(label + " copied \u2713");
+    }
+  } catch (e) {}
+  done(fallbackCopy(html, text) ? label + " copied \u2713"
+                                : "Couldn't copy automatically: select the text below and press Ctrl+C");
+}
+document.getElementById("copyBody").onclick = () => copy(DATA.html, DATA.text, "Email");
+document.getElementById("copySubject").onclick = () => copy("", DATA.subject, "Subject");
+</script></body></html>"""
+
+
+def render_ncr_email(report_pdf: bytes, k: str):
+    """Non-conformance summary email from the finished report, ready to paste into Outlook."""
+    import importlib
+    import json
+    import streamlit.components.v1 as components
+    try:
+        import ncr_email as _ne
+    except ImportError:
+        st.warning("The non-conformance email needs ncr_email.py in the app's repo. "
+                   "Upload it together with app.py.")
+        return
+    if getattr(_ne, "EMAIL_VERSION", None) != _NCR_EMAIL_VERSION:
+        _ne = importlib.reload(_ne)
+    if getattr(_ne, "EMAIL_VERSION", None) != _NCR_EMAIL_VERSION:
+        st.warning("ncr_email.py is out of date. Upload the latest one together with app.py "
+                   "and reboot the app.")
+        return
+    try:
+        summary = _ne.extract_summary(report_pdf)
+    except Exception as e:  # noqa: BLE001
+        st.warning(f"The non-conformance summary couldn't be read from this report: {e}")
+        return
+    if not summary.items and not summary.observed_flag:
+        st.caption("No non-conformance summary was found in this report, so no email was prepared.")
+        return
+
+    st.divider()
+    field_label(_MAGNIFIER_B64, "Non-conformance summary email",
+                tip="Built from the finished report: each non-conformance's subject, status, "
+                    "responsible contractor, location, description, recommended action and "
+                    "required documentation, plus the corrected items from the Executive Summary. "
+                    "Copy email keeps the formatting when pasted into Outlook. Attach the report "
+                    "and add recipients in Outlook.")
+    n = len(summary.items)
+    st.caption(f"{n} non-conformance{'s' if n != 1 else ''} found: "
+               f"{', '.join(it.id for it in summary.items) or 'none'}.")
+
+    notes = _ne.check_notes(summary)
+    if notes:
+        with st.expander(f"Check before sending ({len(notes)})", expanded=True):
+            for note in notes:
+                st.warning(note)
+
+    defaults = _ne.EmailWording()
+    with st.expander("Edit wording"):
+        greeting = st.text_input("Greeting", value=defaults.greeting, key=f"em_greet_{k}")
+        intro = st.text_area("Opening sentence", value=_ne.default_intro(summary), key=f"em_intro_{k}",
+                             height=80)
+        closing = st.text_area("Closing", value=defaults.closing, key=f"em_close_{k}", height=80)
+        sign_off = st.text_input("Sign-off", value=defaults.sign_off, key=f"em_sign_{k}",
+                                 help="Outlook adds your signature below this when you paste.")
+        corrected = st.checkbox("List the corrected non-conformances from the Executive Summary",
+                                value=bool(summary.corrected_ids), key=f"em_corr_{k}",
+                                disabled=not summary.corrected_ids)
+    email = _ne.build_email(summary, _ne.EmailWording(greeting=greeting, intro=intro, closing=closing,
+                                                      sign_off=sign_off, include_corrected=corrected))
+
+    max_h = 460
+    payload = json.dumps({"subject": email.subject, "html": email.html, "text": email.text})
+    widget = (_COPY_WIDGET.replace("__MAXH__", str(max_h))
+              .replace("__DATA__", payload.replace("</", "<\\/")))
+    components.html(widget, height=max_h + 110, scrolling=False)
+
+    st.download_button(
+        "✉ Download as Outlook draft (.eml)",
+        data=_ne.build_eml(email),
+        file_name=f"{(summary.project or 'Report').replace(' ', '_')}_Report_{summary.report_no or ''}"
+                  "_NCR_Summary.eml",
+        mime="message/rfc822",
+        help="Opens as a new, unsent message in Outlook for Windows/Mac with the subject and "
+             "body filled in. Add recipients and attach the report. (Outlook on the web can't "
+             "open .eml drafts: use Copy email instead.)",
+    )
+
+
 def render_captions():
     """Caption tool: post-processed report PDF → captioned PDF copy."""
     import hashlib
@@ -687,6 +823,7 @@ def render_captions():
             mime="application/pdf",
             type="primary",
         )
+        render_ncr_email(ss.cap_pdf, k)
 
 
 # --- What would you like to do? ---
