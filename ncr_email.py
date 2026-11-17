@@ -73,7 +73,9 @@ class NcrItem:
 class ReportSummary:
     project: str = ""
     report_no: str = ""
+    inspection_type: str = ""        # e.g. "Special Inspection", from the "... Report #67" heading
     inspection_date: str = ""
+    visit_date: str = ""             # from "On 10/30/2026 a representative ... visited" (cross-check only)
     report_date: str = ""
     tt_project_no: str = ""
     inspector: str = ""
@@ -163,6 +165,9 @@ def extract_summary(pdf_bytes: bytes) -> ReportSummary:
     raw_all = "\n".join(lines)
 
     # Report details (from the page header, which _lines strips, so read page 1 raw)
+    m = re.search(r"([A-Z][A-Za-z]*(?: [A-Z][A-Za-z]*)*? Inspection) Report #\s*\d+", first_page)
+    if m:
+        s.inspection_type = m.group(1).strip()
     for pattern, attr in ((r"Special Inspection Report #\s*(\d+)", "report_no"),
                           (r"Inspection Date:\s*([\d/.-]+)", "inspection_date"),
                           (r"Report Date:\s*([\d/.-]+)", "report_date"),
@@ -170,6 +175,9 @@ def extract_summary(pdf_bytes: bytes) -> ReportSummary:
         m = re.search(pattern, first_page)
         if m:
             setattr(s, attr, m.group(1).strip())
+    m = re.search(r"\bOn\s*\u200b?\s*(\d{1,2}/\d{1,2}/\d{2,4})\s*\u200b?\s*a representative", first_page)
+    if m:
+        s.visit_date = m.group(1)
     head = _labelled(lines[:60], ["Project", "TT Inspector", "Client", "Project Location"], one_line=True)
     s.project = head.get("Project", "") or head.get("Project Location", "")
     s.inspector = head.get("TT Inspector", "")
@@ -271,6 +279,10 @@ def check_notes(s: ReportSummary) -> list[str]:
         if found:
             msg += f", but the report's non-conformances are {', '.join(found)}"
         notes.append(msg + ". The email uses the non-conformances found in the report body.")
+    if s.inspection_date and s.visit_date and s.inspection_date != s.visit_date:
+        notes.append(f"The report's Inspection Date is {s.inspection_date}, but the description says the "
+                     f"site was visited on {s.visit_date}. The opening sentence uses the Inspection Date; "
+                     "edit it if the visit date is the right one.")
     if s.observed_flag.lower().startswith("no") and found:
         notes.append("The Executive Summary says no non-conformances were observed, "
                      f"but the report body has {len(found)}.")
@@ -317,8 +329,10 @@ def default_intro(s: ReportSummary) -> str:
     if not s.items:
         return (f"No non-conformances were observed during TT's special inspection{when}, "
                 f"as documented in {report}. The full report is attached for reference.")
-    return (f"Please see below a summary of the non-conformances observed during TT's special "
-            f"inspection{when}, as documented in {report}. The full report is attached for reference.")
+    kind = s.inspection_type or "Special Inspection"
+    report = f"{kind} Report #{s.report_no}" if s.report_no else f"the attached {kind.lower()} report"
+    return (f"Please see below a summary of the non-conformances observed during TT's {kind.lower()}"
+            f"{when} as documented in {report}. The full report and NCR log is attached for reference.")
 
 
 def subject_line(s: ReportSummary) -> str:
