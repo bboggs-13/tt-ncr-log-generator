@@ -396,7 +396,62 @@ def _reset_photo_order(group_key, original, k):
     ss.cap_order[group_key] = list(original)
     for position, photo in enumerate(original, start=1):
         ss[f"cap_pos_{k}_{photo}"] = position
+    ver_key = f"cap_dnd_ver_{k}_{group_key}"
+    ss[ver_key] = ss.get(ver_key, 0) + 1     # the drag grid's last move is now out of date
     _invalidate_captions()
+
+
+# Drag-and-drop photo grid: a small Streamlit component in components/photo_grid (plain
+# HTML/JS, no build step). If it's missing or out of date, the app falls back to the
+# position dropdowns.
+_PHOTO_GRID_DIR = Path(__file__).resolve().parent / "components" / "photo_grid"
+_PHOTO_GRID_VERSION = "2026-11-17.1"       # must match PHOTO_GRID_VERSION in its index.html
+_photo_grid_func = None
+
+
+def _photo_grid():
+    global _photo_grid_func
+    if _photo_grid_func is None:
+        index = _PHOTO_GRID_DIR / "index.html"
+        try:
+            ok = f"PHOTO_GRID_VERSION {_PHOTO_GRID_VERSION}" in index.read_text(encoding="utf-8")
+        except OSError:
+            ok = False
+        if not ok:
+            _photo_grid_func = False
+        else:
+            import streamlit.components.v1 as components
+            _photo_grid_func = components.declare_component("tt_photo_grid", path=str(_PHOTO_GRID_DIR))
+    return _photo_grid_func or None
+
+
+def _apply_grid_move(value, group_key, k) -> bool:
+    """Apply a move sent by the drag grid, if it's new. Returns True when the order changed."""
+    ss = st.session_state
+    ver_key = f"cap_dnd_ver_{k}_{group_key}"
+    order = ss.cap_order[group_key]
+    if not isinstance(value, dict) or value.get("version") != ss.get(ver_key, 0):
+        return False                        # nothing sent yet, or a move already applied
+    try:
+        new = [int(x) for x in value.get("order", [])]
+    except (TypeError, ValueError):
+        return False
+    if sorted(new) != sorted(order) or new == order:
+        return False
+    ss.cap_order[group_key] = new
+    for position, photo in enumerate(new, start=1):
+        ss[f"cap_pos_{k}_{photo}"] = position
+    ss[ver_key] = ss.get(ver_key, 0) + 1
+    _invalidate_captions()
+    return True
+
+
+def _data_url(image: bytes | None) -> str:
+    import base64
+    if not image:
+        return ""
+    mime = "image/jpeg" if image[:3] == b"\xff\xd8\xff" else "image/png"
+    return f"data:{mime};base64," + base64.b64encode(image).decode()
 
 
 _COPY_WIDGET = """<!DOCTYPE html><html><head><style>
@@ -598,12 +653,20 @@ def render_captions():
                f"{len({j.page_index for j in jobs})} photo page(s).")
     if any(j.warning for j in jobs):
         st.warning("Some photos couldn\u2019t be linked to an observation. Check them below before exporting.")
-    st.caption("Photos are shown in the same grid as the report, numbered from the top left across "
-               "each row. Pick a new position for any photo to reorder it within its observation; "
-               "the other photos shift along. Each photo keeps its own description.")
+    _grid = _photo_grid()
+    if _grid:
+        st.caption("Photos are shown in the same grid as the report, numbered from the top left across "
+                   "each row. Drag a photo onto another position to reorder it within its observation; "
+                   "the other photos shift along. Each photo keeps its own description.")
+    else:
+        st.caption("Photos are shown in the same grid as the report, numbered from the top left across "
+                   "each row. Pick a new position for any photo to reorder it within its observation; "
+                   "the other photos shift along. Each photo keeps its own description.")
 
     options = ["NCR", "GO", "Skip"]
     for g_index, group in enumerate(groups):
+        grid_key = f"cap_grid_{k}_{group.key}"
+        moved = bool(_grid) and _apply_grid_move(ss.get(grid_key), group.key, k)   # last drag, if any
         order = ss.cap_order[group.key]
         first = jobs[group.jobs[0]]
         default = first.observation_type if first.observation_type in {"NCR", "GO"} else "Skip"
@@ -633,6 +696,15 @@ def render_captions():
                               on_click=_reset_photo_order, args=(group.key, list(group.jobs), k))
             if first.warning:
                 st.warning(first.warning)
+            # Drag-and-drop grid (or the position dropdowns if the component isn't available)
+            if _grid:
+                photos_arg = [{"id": int(photo), "orig": group.jobs.index(photo) + 1,
+                               "src": _data_url(ss.cap_previews[photo] if photo < len(ss.cap_previews) else None)}
+                              for photo in order]
+                value = _grid(photos=photos_arg, columns=group.columns,
+                              version=ss.get(f"cap_dnd_ver_{k}_{group.key}", 0), key=grid_key, default=None)
+                if not moved and _apply_grid_move(value, group.key, k):
+                    st.rerun()              # this Streamlit didn't expose the value early: redraw once
             # One cell per grid slot, in the report's layout: left to right, then down.
             positions = list(range(1, len(order) + 1))
             for row_start in range(0, len(order), group.columns):
@@ -642,19 +714,24 @@ def render_captions():
                     slot_job = jobs[group.jobs[position - 1]]
                     job = jobs[photo]
                     with cells[offset]:
-                        preview = ss.cap_previews[photo] if photo < len(ss.cap_previews) else None
-                        if preview:
-                            st.image(preview)
                         pos_key = f"cap_pos_{k}_{photo}"
                         if ss.get(pos_key) != position:
                             ss[pos_key] = position
-                        st.selectbox(
-                            "Photo position", positions, key=pos_key,
-                            on_change=_move_photo, args=(group.key, photo, pos_key, k),
-                            help="Where this photo sits in the observation's grid. Photo 1 is top "
-                                 "left, photo 2 top right, photo 3 the left side of row 2, and so on, "
-                                 "continuing onto the next page if the photos run over.",
-                        )
+                        if _grid:
+                            moved_note = (f" \u00b7 originally photo {group.jobs.index(photo) + 1}"
+                                          if photo != group.jobs[position - 1] else "")
+                            st.markdown(f"**Photo {position}**{moved_note}")
+                        else:
+                            preview = ss.cap_previews[photo] if photo < len(ss.cap_previews) else None
+                            if preview:
+                                st.image(preview)
+                            st.selectbox(
+                                "Photo position", positions, key=pos_key,
+                                on_change=_move_photo, args=(group.key, photo, pos_key, k),
+                                help="Where this photo sits in the observation's grid. Photo 1 is top "
+                                     "left, photo 2 top right, photo 3 the left side of row 2, and so on, "
+                                     "continuing onto the next page if the photos run over.",
+                            )
                         caption = st.text_input("Photo description", value=job.caption,
                                                 key=f"cap_text_{k}_{photo}",
                                                 help="Keep or edit the description already under the photo.",
@@ -666,7 +743,7 @@ def render_captions():
                                 st.caption(str(exc))
                         else:
                             st.caption("Skipped until the observation type and number are set.")
-                        if photo != group.jobs[position - 1]:
+                        if not _grid and photo != group.jobs[position - 1]:
                             st.caption(f"Originally photo {group.jobs.index(photo) + 1}")
                         job.caption = caption
             for photo in group.jobs:
