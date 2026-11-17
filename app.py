@@ -14,6 +14,7 @@ Run locally:   streamlit run app.py
 """
 from pathlib import Path
 _CAPTION_ENGINE_VERSION = "2026-11-09.1"   # must match caption_engine.ENGINE_VERSION
+_NCR_ENGINE_VERSION = "2026-11-17.2"       # must match engine.ENGINE_VERSION
 
 import streamlit as st
 from PIL import Image
@@ -195,6 +196,19 @@ _TOOL_TIPS = (
 
 def render_ncr_log():
     """NCR log tool: PlanRadar CSV → formatted TT Excel log (+ summary PDF)."""
+    global engine
+    if getattr(engine, "ENGINE_VERSION", None) != _NCR_ENGINE_VERSION:
+        import importlib
+        engine = importlib.reload(engine)   # Streamlit can keep an old copy in memory after an update
+    if getattr(engine, "ENGINE_VERSION", None) != _NCR_ENGINE_VERSION:
+        st.error(
+            f"engine.py is out of date (found {getattr(engine, 'ENGINE_VERSION', 'an older version')}, "
+            f"this app needs {_NCR_ENGINE_VERSION}). Upload the new engine.py and the three "
+            "Special templates in assets/ together with app.py, then reboot the app "
+            "(Manage app → Reboot). No log is generated until they match, so the columns "
+            "can't come out mixed up."
+        )
+        st.stop()
     # Inspection type selector (drives which template/columns are used)
     field_label(_MAGNIFIER_B64, "Inspection type")
     _type_keys = list(engine.INSPECTION_TYPES.keys())
@@ -338,6 +352,8 @@ def render_ncr_log():
                      "opens, with the same colours and legend. All columns fit the page width; "
                      "longer logs continue onto more pages with the column headers repeated.",
             )
+
+        st.caption(f"NCR log engine {engine.ENGINE_VERSION}")
 
         # Time Sensitive logs: one-page PDF summary of open items by age band
         if _profile.age_highlight:
