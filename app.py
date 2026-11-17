@@ -1,690 +1,787 @@
-"""Site Visit Post-Processing Tools — Streamlit web app.
+"""TTFE Inspection Log — import engine.
 
-Two TT site-visit tools behind one "What would you like to do?" choice:
-  • Post-process report — captions the photos (REPORT.NCR/GO.OBS-n), adds section
-    borders, tightens spacing and adds signatures (caption_engine.py, section_boxes.py).
-  • Generate an NCR log — converts a PlanRadar CSV export into the formatted TT
-    Excel log, plus the Time Sensitive summary PDF (engine.py, summary_pdf.py).
+Turns a PlanRadar CSV export into a standard TT Excel log. Supports multiple
+inspection types, each with its own template and column layout but identical
+formatting (logo, borders, 10pt font, Status dropdown + filter + live
+conditional highlighting, audit sheet).
 
-Styling mirrors the Thornton Tomasetti website: warm cream canvas, bold
-headings, olive (#8B9064) + terra cotta (#D4451D) accents, cool-gray body
-text (#76767B). Theme base lives in .streamlit/config.toml.
-
-Run locally:   streamlit run app.py
+Add or change a type by editing the PROFILES dict below — no UI changes needed.
 """
+from __future__ import annotations
+
+import colorsys
+import io
+from copy import copy
+from dataclasses import dataclass, field, replace
+from datetime import date, datetime
 from pathlib import Path
-_CAPTION_ENGINE_VERSION = "2026-11-09.1"   # must match caption_engine.ENGINE_VERSION
 
-import streamlit as st
-from PIL import Image
+import pandas as pd
+from openpyxl.worksheet.filters import CustomFilter, CustomFilters, FilterColumn
+from openpyxl import load_workbook
+from openpyxl.drawing.image import Image as XLImage
+from openpyxl.drawing.spreadsheet_drawing import OneCellAnchor, AnchorMarker
+from openpyxl.drawing.xdr import XDRPositiveSize2D
+from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+from openpyxl.worksheet.datavalidation import DataValidation
+from openpyxl.utils import column_index_from_string, get_column_letter
+from openpyxl.formatting.rule import FormulaRule
 
-import base64
-import html
+ASSETS = Path(__file__).parent / "assets"
+LOGO_PATH = ASSETS / "tt_logo.png"
 
-import engine
+# --- Shared layout (same for every template) ---
+SHEET = "Sheet1"                     # legacy name (templates are now titled per log type)
+SHEET_TITLES = {                     # Excel tab names (31-char limit)
+    "special": "NCR Log",
+    "special_time": "Time Sensitive NCR Log",
+    "special_closeout": "Project Closeout NCR Log",
+    "regular": "Site Inspection Log",
+    "regular_time": "Time Sensitive Site Insp. Log",
+}
+SUMMARY_SHEET = "Summary"
+AUDIT_SHEET = "Import Audit"
+FREEZE_CELL = "A8"                   # rows 1-7 (logo, project, date, legend, column titles) stay visible
+HEADER_ROW = 7
+DATA_START_ROW = 8
+TITLE_ROW = 4
+DATE_ROW = 5
+FONT_SIZE = 10.0
 
-_ICON = Image.open(Path(engine.ASSETS) / "tt_icon.png")
+# Status fills / options / highlighting
+OPEN_FILL = PatternFill(start_color="FFBDD7EE", end_color="FFBDD7EE", fill_type="solid")
+CLOSED_FILL = PatternFill(start_color="FFC6E0B4", end_color="FFC6E0B4", fill_type="solid")
+INPROGRESS_FILL = PatternFill(start_color="FFFFE699", end_color="FFFFE699", fill_type="solid")
+STATUS_OPTIONS = ["Open", "In Progress", "Closed"]
 
-def _icon_b64(name):
-    return base64.b64encode((Path(engine.ASSETS) / name).read_bytes()).decode()
-
-_PAPERCLIP_B64 = _icon_b64("paperclip.png")
-_BUILDING_B64 = _icon_b64("building.png")
-_MAGNIFIER_B64 = _icon_b64("clipboard.png")
-_LINK_B64 = _icon_b64("link.png")
-_TOOLS_B64 = _icon_b64("tools.png")
-
-def field_label(icon_b64, text, tip=None, container=None):
-    """Icon + text label for an input. With `tip`, an (i) icon is added and the
-    explanation shows only while the mouse is over the label (or it has focus)."""
-    tip_html = ""
-    if tip:
-        tip_html = ('<span class="tt-tip-icon" aria-hidden="true">i</span>'
-                    f'<span class="tt-tip-text" role="tooltip">{html.escape(tip)}</span>')
-    cls, attrs = ("tt-field-label tt-has-tip", ' tabindex="0"') if tip else ("tt-field-label", "")
-    (container or st).markdown(
-        f'<div class="{cls}"{attrs}>'
-        f'<img src="data:image/png;base64,{icon_b64}"/> {text}{tip_html}</div>',
-        unsafe_allow_html=True,
-    )
-
-st.set_page_config(
-    page_title="Site Visit Post-Processing Tools",
-    page_icon=_ICON,
-    layout="centered",
+# Time Sensitive NCR Log: age bands measured from the log's "Date Updated" (C5).
+# (min_days, max_days or None, label, fill) — muted, incrementally stronger tones.
+AGE_BANDS = [
+    (30, 60, "30–60 days", PatternFill(start_color="FFFFF2CC", end_color="FFFFF2CC", fill_type="solid")),
+    (60, 90, "60–90 days", PatternFill(start_color="FFF8CBAD", end_color="FFF8CBAD", fill_type="solid")),
+    (90, None, "90+ days", PatternFill(start_color="FFF0A8A8", end_color="FFF0A8A8", fill_type="solid")),
+]
+DATE_FMT = "yyyy-mm-dd"
+# Items closed recently: non-overlapping bands of days since Date Closed (inclusive),
+# plus a total card covering all of them. (min_days, max_days, label, colour)
+CLOSED_BANDS = (
+    (0, 29, "Last 30 days", "#C6E0B4"),      # log Closed green
+    (30, 59, "30–59 days ago", "#D5E8C8"),
+    (60, 90, "60–90 days ago", "#E2EFDA"),
 )
+CLOSED_TOTAL = (0, 90, "Total, last 90 days", "#A9D08E")
+TEXT_FIELDS = ("Title", "Description", "Recommended Action", "Required Documentation",
+               "Remarks")  # left + vertically centered
+CLOSED_WORDS = ("closed", "close")
 
-# --- TT-website-inspired styling ---
-st.markdown(
+
+def _pastel(hex6: str, saturation: float = 0.65, lightness: float = 0.86) -> PatternFill:
+    """Pastel version of a brand colour: keep its hue, set saturation and lightness."""
+    r, g, b = (int(hex6[i:i + 2], 16) / 255 for i in (0, 2, 4))
+    hue, _l, _s = colorsys.rgb_to_hls(r, g, b)
+    t = "".join(f"{round(c * 255):02X}" for c in colorsys.hls_to_rgb(hue, lightness, saturation))
+    return PatternFill(start_color="FF" + t, end_color="FF" + t, fill_type="solid")
+
+
+# Project Closeout NCR Log: rows shaded by NCR type, pastel TT primary colours
+# (TR-1 soft green #CDEBCF; pastel Terracotta #D4451D and Dark Blue #004050).
+TYPE_FILLS = [
+    ("TR-1", "Green", PatternFill(start_color="FFCDEBCF", end_color="FFCDEBCF", fill_type="solid")),  # soft green (not TT olive)
+    ("TR-8", "Terracotta", _pastel("D4451D")),
+    ("QA/QC", "Dark Blue", _pastel("004050")),
+]
+
+# Borders
+_THIN = Side(style="thin", color="FF000000")
+_THICK = Side(style="thick", color="FF000000")
+THIN_BORDER = Border(left=_THIN, right=_THIN, top=_THIN, bottom=_THIN)
+THICK_BORDER = Border(left=_THICK, right=_THICK, top=_THICK, bottom=_THICK)
+
+LOGO_WIDTH_IN = 3.0
+EMU_PER_IN = 914400
+
+# Alternate CSV header names accepted for a given logical field (first match wins).
+ALIASES = {
+    "Report #": ["Report", "Report No", "Report No.", "Report Number", "Report#"],
+    "Non-Conformance #": ["Item #", "Item", "Observation #", "Inspection #", "Issue #"],
+    "Type": ["NCR Type", "Type of NCR", "Category"],
+    "Responsible Party": ["Responsible", "Party Responsible", "Responsible party",
+                          "Trade", "Contractor", "Assigned to"],
+    "Responsible Subcontractor": ["Responsible Sub", "Subcontractor", "Responsible Contractor",
+                                  "Responsible Party", "Responsible"],
+    "Floor": ["Level", "Floor / Level", "Floor/Level"],
+    "Required Documentation": ["Documentation Required", "Documentation", "Documents Required"],
+    "Remarks": ["Updates", "Update", "Comments"],   # newer PlanRadar exports call it Updates
+}
+
+
+@dataclass(frozen=True)
+class Profile:
+    key: str
+    label: str
+    template: str                 # filename in assets/
+    column_map: dict              # csv field -> template column letter
+    required_columns: list        # logical field names that must resolve
+    center_columns: list          # 1-based column indices to center
+    status_col: int               # 1-based index of the Status column
+    last_col: int                 # 1-based index of the last column
+    age_highlight: bool = False   # Time Sensitive: shade open rows by age of Observation Date
+    type_highlight: bool = False  # Project Closeout: shade rows by NCR Type
+    status_colors: bool = True    # blue/yellow/green Status-cell colours (off when rows are shaded)
+    filter_open: bool = True      # every log opens pre-filtered to non-Closed items
+    legend_cols: tuple = ("E", "F")  # legend: (swatch column, label column[, last label column])
+    ui_note: str = ""             # short explanation shown in the app
+
+
+_AGE_NOTE = ("Open items are shaded across the whole row by days since the Observation Date, "
+             "measured from the log's Date Updated: under 30 none · 30–59 yellow · 60–89 orange · "
+             "90+ red. Closed items are not shaded.")
+_FILTER_NOTE = ("The log opens showing open items only. Closed items are still in the log — "
+                "choose Select All in the Status filter to show them.")
+
+# Special Inspections columns (Priority not shown; Type only in the Closeout log).
+# Column titles come from the templates ("Non-Conformance #" is headed "NCR #",
+# "Required Documentation" is headed "Documentation Required").
+_SPECIAL_MAP = {
+    "Report #": "A", "Non-Conformance #": "B", "Observation Date": "C", "Status": "D",
+    "Floor": "E", "Responsible Subcontractor": "F", "Title": "G", "Description": "H",
+    "Recommended Action": "I", "Required Documentation": "J", "Remarks": "K",
+    "Date Closed": "L", "Link to ticket": "M",
+}
+_SPECIAL_REQ = ["Report #", "Non-Conformance #", "Observation Date", "Status"]
+_SPECIAL_CENTER = [1, 2, 3, 4, 5, 6, 12, 13]
+
+_REGULAR_MAP = {
+    "Report #": "A", "Non-Conformance #": "B", "Observation Date": "C",
+    "Responsible Party": "D", "Description": "E", "Recommended Action": "F",
+    "Status": "G", "Remarks": "H", "Date Closed": "I",
+}
+_REGULAR_REQ = ["Observation Date", "Status"]
+_REGULAR_CENTER = [1, 2, 3, 4, 7, 9]
+
+
+PROFILES = {
+    "special": Profile(
+        key="special",
+        label="Special Inspections",
+        template="TTFE_Template.xlsx",
+        column_map=_SPECIAL_MAP, required_columns=_SPECIAL_REQ,
+        center_columns=_SPECIAL_CENTER, status_col=4, last_col=13,
+        ui_note=_FILTER_NOTE,
+    ),
+    "special_time": Profile(
+        key="special_time",
+        label="Special Inspections — Time Sensitive NCR Log",
+        template="TTFE_Template_TimeSensitive.xlsx",
+        column_map=_SPECIAL_MAP, required_columns=_SPECIAL_REQ,
+        center_columns=_SPECIAL_CENTER, status_col=4, last_col=13,
+        age_highlight=True, status_colors=False, filter_open=True,
+        legend_cols=("D", "E", "G"),  # swatches in the narrow Status column, labels across E:G
+        ui_note=_AGE_NOTE + " " + _FILTER_NOTE,
+    ),
+    "special_closeout": Profile(
+        key="special_closeout",
+        label="Special Inspections — Project Closeout NCR Log",
+        template="TTFE_Template_Closeout.xlsx",
+        column_map={
+            "Report #": "A", "Non-Conformance #": "B", "Observation Date": "C", "Status": "D",
+            "Type": "E", "Floor": "F", "Responsible Subcontractor": "G", "Title": "H",
+            "Description": "I", "Recommended Action": "J", "Required Documentation": "K",
+            "Remarks": "L", "Date Closed": "M", "Link to ticket": "N",
+        },
+        required_columns=["Report #", "Non-Conformance #", "Observation Date", "Type", "Status"],
+        center_columns=[1, 2, 3, 4, 5, 6, 7, 13, 14], status_col=4, last_col=14,
+        type_highlight=True, status_colors=False, filter_open=True,
+        legend_cols=("D", "E", "G"),  # swatches in the narrow Status column, labels across E:G
+        ui_note=("Rows are shaded by NCR Type in pastel colours: TR-1 green · TR-8 terracotta · "
+                 "QA/QC dark blue. Other or blank types are not shaded. " + _FILTER_NOTE),
+    ),
+    "regular": Profile(
+        key="regular",
+        label="Regular Site Inspections",
+        template="TTFE_Template_Regular.xlsx",
+        column_map=_REGULAR_MAP, required_columns=_REGULAR_REQ,
+        center_columns=_REGULAR_CENTER, status_col=7, last_col=9,
+        ui_note=_FILTER_NOTE,
+    ),
+    "regular_time": Profile(
+        key="regular_time",
+        label="Regular Site Inspections — Time Sensitive Site Inspection Log",
+        template="TTFE_Template_Regular_TimeSensitive.xlsx",
+        column_map=_REGULAR_MAP, required_columns=_REGULAR_REQ,
+        center_columns=_REGULAR_CENTER, status_col=7, last_col=9,
+        age_highlight=True, status_colors=False, filter_open=True,
+        legend_cols=("D", "E"),  # narrow Responsible Party column holds the swatches
+        ui_note=_AGE_NOTE + " " + _FILTER_NOTE,
+    ),
+}
+DEFAULT_PROFILE = "special"
+
+# What the UI shows: inspection types, and (optionally) log variants within a type.
+INSPECTION_TYPES = {"special": "Special Inspections", "regular": "Regular Site Inspections"}
+LOG_VARIANTS = {
+    "special": {"Standard NCR Log": "special", "Time Sensitive NCR Log": "special_time",
+                "Project Closeout NCR Log": "special_closeout"},
+    "regular": {"Standard Site Inspection Log": "regular",
+                "Time Sensitive Site Inspection Log": "regular_time"},
+}
+
+
+def resolve_profile_key(inspection_type: str, log_variant: str | None = None) -> str:
+    variants = LOG_VARIANTS.get(inspection_type)
+    if variants and log_variant in variants:
+        return variants[log_variant]
+    return inspection_type
+
+
+def get_profile(key: str) -> Profile:
+    return PROFILES.get(key, PROFILES[DEFAULT_PROFILE])
+
+
+# PlanRadar link column: added as the last column when the contractor has PlanRadar
+# access, left out when they don't (the link is no use to them).
+LINK_FIELD = "Link to ticket"
+LINK_WIDTH = 67.86  # same width as the link column in the Special templates
+
+
+def with_planradar_link(profile: Profile, include: bool) -> Profile:
+    """Return the profile with the PlanRadar link column added or removed."""
+    has = LINK_FIELD in profile.column_map
+    if include and not has:
+        col = profile.last_col + 1
+        return replace(profile,
+                       column_map={**profile.column_map, LINK_FIELD: get_column_letter(col)},
+                       center_columns=[*profile.center_columns, col], last_col=col)
+    if not include and has:
+        col = column_index_from_string(profile.column_map[LINK_FIELD])
+        assert col == profile.last_col, "link column must be the last column"
+        return replace(profile,
+                       column_map={k: v for k, v in profile.column_map.items() if k != LINK_FIELD},
+                       center_columns=[c for c in profile.center_columns if c != col],
+                       last_col=col - 1)
+    return profile
+
+
+def _fit_link_column(ws, profile: Profile):
+    """Make the template's header row match the profile's link setting."""
+    link = profile.column_map.get(LINK_FIELD)
+    if link:
+        head = ws[f"{link}{HEADER_ROW}"]
+        if head.value != LINK_FIELD:  # template has no link column: style it like its neighbour
+            prev = ws.cell(HEADER_ROW, profile.last_col - 1)
+            head.value = LINK_FIELD
+            for attr in ("font", "fill", "alignment", "border", "number_format", "protection"):
+                setattr(head, attr, copy(getattr(prev, attr)))
+        ws.column_dimensions[link].width = LINK_WIDTH
+    else:
+        col = profile.last_col + 1
+        if ws.cell(HEADER_ROW, col).value == LINK_FIELD:  # template has one: drop it
+            ws.delete_cols(col)
+            ws.column_dimensions.pop(get_column_letter(col), None)
+
+
+def _resolve_field(field_name: str, df: pd.DataFrame):
+    """Return the actual CSV column for a logical field, honoring aliases."""
+    if field_name in df.columns:
+        return field_name
+    for alt in ALIASES.get(field_name, []):
+        if alt in df.columns:
+            return alt
+    return None
+
+
+def _coerce(val):
+    s = str(val).replace(",", "").replace("$", "").strip()
+    if s == "":
+        return None
+    try:
+        f = float(s)
+        return int(f) if f.is_integer() else f
+    except ValueError:
+        return val
+
+
+# How a field is listed in the app's "Expected CSV columns" note, when the current
+# PlanRadar export names it differently from the log field.
+_EXPECTED_NAMES = {"Remarks": "Updates (or Remarks)"}
+
+
+def expected_columns(profile: Profile) -> list:
+    return [_EXPECTED_NAMES.get(f, f) for f in profile.column_map]
+
+
+def validate(df: pd.DataFrame, profile: Profile):
+    msgs = []
+    missing = [c for c in profile.required_columns if _resolve_field(c, df) is None]
+    if missing:
+        msgs.append(f"Missing required columns: {', '.join(missing)}")
+    if df.empty:
+        msgs.append("The CSV has no data rows.")
+    mapped = set()
+    for fld in profile.column_map:
+        actual = _resolve_field(fld, df)
+        if actual:
+            mapped.add(actual)
+    unknown = [c for c in df.columns if c not in mapped and c != LINK_FIELD]
+    if unknown:
+        msgs.append(f"Note: unmapped columns will be ignored: {', '.join(unknown)}")
+    absent = [f for f in profile.column_map
+              if f not in profile.required_columns and _resolve_field(f, df) is None]
+    if absent:
+        names = ", ".join(f"'{f}'" for f in absent)
+        msgs.append(f"Note: the CSV has no {names} column(s); "
+                    f"{'that column is' if len(absent) == 1 else 'those columns are'} left blank.")
+    ok = not missing and not df.empty
+    return ok, msgs
+
+
+def _apply_age_highlight(ws, profile, n, last_row, last_col_letter):
+    """Shade whole data rows by days between Observation Date and Date Updated (C5).
+
+    C5 and the Observation Date cells are written as real dates so Excel can do the
+    math; editing C5 later re-ages the log automatically.
     """
-    <style>
-      :root {
-        --tt-olive: #8B9064;
-        --tt-terra: #D4451D;
-        --tt-gray:  #76767B;
-        --tt-ink:   #1A1A17;
-        --tt-cream: #FAF9F5;
-      }
-      .block-container { padding-top: 3.5rem; max-width: 860px; }
+    gen = date.today()
+    ws["C5"] = gen
+    ws["C5"].number_format = DATE_FMT
 
-      /* Small uppercase category label, like the TT site's NEWS / INSIGHT tags */
-      .tt-eyebrow {
-        color: var(--tt-terra);
-        font-size: 0.75rem;
-        font-weight: 700;
-        letter-spacing: 0.18em;
-        text-transform: uppercase;
-        margin: 0.75rem 0 0.25rem;
-      }
-      /* Big bold near-black headline, TT-style */
-      h1 {
-        color: var(--tt-ink) !important;
-        font-weight: 800 !important;
-        letter-spacing: -0.02em;
-        line-height: 1.05;
-      }
-      h2, h3 {
-        color: var(--tt-ink) !important;
-        font-weight: 700 !important;
-        letter-spacing: -0.01em;
-      }
-      /* Section labels get an olive tint to echo the wordmark */
-      h3 { color: var(--tt-olive) !important; text-transform: none; }
+    obs_letter = profile.column_map["Observation Date"]
+    for r in range(DATA_START_ROW, DATA_START_ROW + n):
+        cell = ws[f"{obs_letter}{r}"]
+        parsed = pd.to_datetime(cell.value, errors="coerce") if cell.value not in (None, "") else pd.NaT
+        if not pd.isna(parsed):
+            cell.value = parsed.date()
+            cell.number_format = DATE_FMT
 
-      /* Terra-cotta rule under the header, echoing the site's accent bars */
-      .tt-rule { height: 4px; width: 64px; background: var(--tt-terra);
-                 border: none; margin: 1rem 0 1.5rem; border-radius: 2px; }
+    dc_letter = profile.column_map.get("Date Closed")
+    if dc_letter:
+        for r in range(DATA_START_ROW, DATA_START_ROW + n):
+            cell = ws[f"{dc_letter}{r}"]
+            parsed = pd.to_datetime(cell.value, errors="coerce") if cell.value not in (None, "") else pd.NaT
+            if not pd.isna(parsed):
+                cell.value = parsed.date()
+                cell.number_format = DATE_FMT
 
-      /* Metric values in terra cotta, labels in olive */
-      [data-testid="stMetricValue"] { color: var(--tt-terra) !important; font-weight: 800; }
-      [data-testid="stMetricLabel"] { color: var(--tt-olive) !important;
-                 text-transform: uppercase; letter-spacing: 0.08em; font-size: 0.72rem; }
+    if n > 0:
+        rng = f"A{DATA_START_ROW}:{last_col_letter}{last_row}"
+        age = f"($C$5-${obs_letter}{DATA_START_ROW})"
+        # Only items that are still open get aged; Closed items are never shaded.
+        st_cell = f"LOWER(TRIM(${get_column_letter(profile.status_col)}{DATA_START_ROW}))"
+        not_closed = ",".join(f'{st_cell}<>"{w}"' for w in CLOSED_WORDS)
+        for lo, hi, _label, fill in AGE_BANDS:
+            cond = f"{age}>={lo}" if hi is None else f"{age}>={lo},{age}<{hi}"
+            ws.conditional_formatting.add(rng, FormulaRule(
+                formula=[f"AND(ISNUMBER(${obs_letter}{DATA_START_ROW}),{not_closed},{cond})"], fill=fill))
 
-      /* Buttons: use primaryColor (terra cotta); darken slightly on hover */
-      .stDownloadButton button, .stButton button { font-weight: 700; letter-spacing: 0.01em; }
-      .stDownloadButton button:hover, .stButton button:hover { filter: brightness(0.93); }
-
-      /* Icon + text labels for the input fields */
-      .tt-field-label {
-        display: flex; align-items: center; gap: 8px;
-        font-size: 0.9rem; font-weight: 600; color: var(--tt-ink);
-        margin: 0.5rem 0 0.35rem;
-      }
-      .tt-field-label img { height: 20px; width: 20px; object-fit: contain; }
-
-      /* Thin divider between the tool choice and the selected tool */
-      .tt-divider { border: none; height: 1px; background: #E4DFD3; margin: 1.1rem 0 0.6rem; }
-
-      /* Hover-only explanations on field labels: frosted cream card, olive accent */
-      .tt-has-tip { position: relative; cursor: help; width: fit-content; outline: none; }
-      .tt-tip-icon {
-        display: inline-flex; align-items: center; justify-content: center;
-        width: 16px; height: 16px; border-radius: 50%;
-        background: rgba(139, 144, 100, 0.14); color: var(--tt-olive);
-        font-size: 10px; font-weight: 700; font-style: italic; font-family: Georgia, serif;
-        transition: background 0.15s ease, color 0.15s ease;
-      }
-      .tt-has-tip:hover .tt-tip-icon, .tt-has-tip:focus .tt-tip-icon {
-        background: var(--tt-olive); color: #FFFFFF;
-      }
-      .tt-tip-text {
-        visibility: hidden; opacity: 0; transform: translateY(-4px);
-        transition: opacity 0.16s ease, transform 0.16s ease, visibility 0.16s;
-        position: absolute; left: -6px; top: calc(100% + 10px); z-index: 1000;
-        width: max-content; max-width: min(420px, 85vw);
-        background: rgba(250, 249, 245, 0.97);           /* TT cream; masks text underneath */
-        -webkit-backdrop-filter: blur(10px) saturate(1.2);
-        backdrop-filter: blur(10px) saturate(1.2);
-        border: 1px solid rgba(139, 144, 100, 0.28);
-        border-left: 3px solid var(--tt-olive);
-        border-radius: 10px;
-        box-shadow: 0 8px 24px rgba(26, 26, 23, 0.10), 0 1px 3px rgba(26, 26, 23, 0.06);
-        color: var(--tt-ink);
-        font-size: 0.8rem; font-weight: 400; line-height: 1.55; letter-spacing: 0.005em;
-        padding: 10px 14px 10px 12px;
-        pointer-events: none;
-      }
-      .tt-tip-text::before {                               /* small pointer toward the label */
-        content: ""; position: absolute; top: -6px; left: 18px;
-        width: 10px; height: 10px; transform: rotate(45deg);
-        background: rgba(250, 249, 245, 0.99);
-        border-top: 1px solid rgba(139, 144, 100, 0.28);
-        border-left: 1px solid rgba(139, 144, 100, 0.28);
-        border-top-left-radius: 2px;
-      }
-      .tt-has-tip:hover .tt-tip-text, .tt-has-tip:focus .tt-tip-text {
-        visibility: visible; opacity: 1; transform: translateY(0);
-      }
-      /* Let the tooltip float over the widget below instead of being clipped */
-      [data-testid="stElementContainer"]:has(.tt-has-tip),
-      .element-container:has(.tt-has-tip) { position: relative; z-index: 5; overflow: visible !important; }
-      /* The label being hovered rises above everything below it (incl. the next label) */
-      [data-testid="stElementContainer"]:has(.tt-has-tip:hover),
-      [data-testid="stElementContainer"]:has(.tt-has-tip:focus),
-      .element-container:has(.tt-has-tip:hover),
-      .element-container:has(.tt-has-tip:focus) { z-index: 1000; }
-      [data-testid="stMarkdownContainer"]:has(.tt-has-tip) { overflow: visible !important; }
-
-      /* Keep the logo fully visible: square edges, no crop */
-      [data-testid="stImage"] img, .stImage img {
-        border-radius: 0 !important;
-        object-fit: contain !important;
-        clip-path: none !important;
-      }
-    </style>
-    """,
-    unsafe_allow_html=True,
-)
-
-# --- Header ---
-st.image(str(engine.LOGO_PATH), width=280)
-st.markdown('<div class="tt-eyebrow">Façade Engineering</div>', unsafe_allow_html=True)
-st.title("Site Visit Post-Processing Tools")
-st.markdown('<hr class="tt-rule">', unsafe_allow_html=True)
-st.caption("Tools for finishing PlanRadar site visit outputs: post-process a report, "
-           "or turn a non-conformance export into the formatted TT log.")
-
-TOOL_CAPTIONS = "Post-process report"
-TOOL_NCR = "Generate an NCR log"
-_TOOL_TIPS = (
-    "Post-process report: upload a site visit report PDF to caption its photos, add "
-    "section borders, tighten spacing and add signatures.  ·  Generate an NCR log: upload a "
-    "PlanRadar CSV export and download the formatted TT Excel log."
-)
+    rows = [("Less than 30 days (no highlight)", None)] + [
+        (f"{lo} to {hi - 1} days" if hi else f"{lo}+ days", fill) for lo, hi, _l, fill in AGE_BANDS
+    ]
+    _write_legend(ws, profile,
+                  "Legend: Days Since Observation Date, Open Items Only (as of Date Updated)", rows)
 
 
-def render_ncr_log():
-    """NCR log tool: PlanRadar CSV → formatted TT Excel log (+ summary PDF)."""
-    # Inspection type selector (drives which template/columns are used)
-    field_label(_MAGNIFIER_B64, "Inspection type")
-    _type_keys = list(engine.INSPECTION_TYPES.keys())
-    _type_labels = dict(engine.INSPECTION_TYPES)
-    try:
-        insp_type = st.segmented_control(
-            "Inspection type", options=_type_keys,
-            format_func=lambda k: _type_labels[k],
-            default=engine.DEFAULT_PROFILE, label_visibility="collapsed",
-        ) or engine.DEFAULT_PROFILE
-    except AttributeError:
-        insp_type = st.radio(
-            "Inspection type", options=_type_keys,
-            format_func=lambda k: _type_labels[k],
-            horizontal=True, label_visibility="collapsed",
-        )
-
-    # PlanRadar access: Yes adds the "Link to ticket" column, No leaves it out
-    field_label(_LINK_B64, "Does the contractor have PlanRadar access?",
-                tip="Yes includes the PlanRadar Link to ticket column in the log. "
-                    "No leaves it out, since the contractor can't open the links.")
-    _pr_options = ["Yes", "No"]
-    try:
-        _pr = st.segmented_control(
-            "PlanRadar access", options=_pr_options, default="Yes",
-            label_visibility="collapsed", key="planradar_access",
-        ) or "Yes"
-    except AttributeError:
-        _pr = st.radio("PlanRadar access", options=_pr_options, horizontal=True,
-                       label_visibility="collapsed", key="planradar_access")
-    planradar_access = _pr == "Yes"
-
-    # Log type buttons (same style as Inspection type) for each inspection type
-    log_variant = None
-    if insp_type in engine.LOG_VARIANTS:
-        _log_label = st.empty()   # filled below, once the chosen log type is known
-        _variants = list(engine.LOG_VARIANTS[insp_type].keys())
-        try:
-            log_variant = st.segmented_control(
-                "Log type", options=_variants, default=_variants[0],
-                label_visibility="collapsed", key=f"log_type_{insp_type}",
-            ) or _variants[0]          # clicking the active button again keeps a selection
-        except AttributeError:         # older Streamlit without segmented_control
-            log_variant = st.radio(
-                "Log type", options=_variants, horizontal=True,
-                label_visibility="collapsed", key=f"log_type_{insp_type}",
-            )
-        _note = engine.get_profile(engine.resolve_profile_key(insp_type, log_variant)).ui_note
-        field_label(_MAGNIFIER_B64, "Log type", tip=_note or None, container=_log_label)
-    profile_key = engine.resolve_profile_key(insp_type, log_variant)
-
-    _profile = engine.with_planradar_link(engine.get_profile(profile_key), planradar_access)
-    with st.expander(f"Expected CSV columns — {_profile.label}"):
-        st.write(", ".join(engine.expected_columns(_profile)))
-        st.write(f"**Required:** {', '.join(_profile.required_columns)}")
-
-    field_label(_BUILDING_B64, "Project name (written to cell A4)")
-    project = st.text_input(
-        "Project name (written to cell A4)",
-        value="134 Jane Street",
-        label_visibility="collapsed",
-    )
-
-    field_label(_PAPERCLIP_B64, "Upload CSV")
-    uploaded = st.file_uploader(
-        "Upload CSV", type=["csv"], label_visibility="collapsed"
-    )
-
-    if uploaded is not None:
-        csv_bytes = uploaded.getvalue()
-        try:
-            xlsx, df, msgs = engine.process_csv_bytes(
-                csv_bytes, inspection_type=profile_key,
-                project_name=project.strip() or "134 Jane Street",
-                planradar_access=planradar_access,
-            )
-        except Exception as e:  # noqa: BLE001
-            st.error(f"Could not read the CSV: {e}")
-            st.stop()
-
-        ok = xlsx is not None
-        blocking = [m for m in msgs if not m.startswith("Note:")]
-        notes = [m for m in msgs if m.startswith("Note:")]
-
-        if not ok:
-            for m in blocking:
-                st.error(m)
-            st.stop()
-
-        for m in notes:
-            st.info(m)
-
-        st.success(f"Validated {len(df)} rows.")
-
-        st.subheader("Preview")
-        st.dataframe(df.head(15), use_container_width=True)
-
-        # Status summary
-        counts = df["Status"].str.strip().str.lower().value_counts().to_dict() if "Status" in df else {}
-        open_n = counts.get("open", 0)
-        inprog_n = counts.get("in progress", 0) + counts.get("in-progress", 0) + counts.get("wip", 0)
-        closed_n = counts.get("closed", 0) + counts.get("close", 0)
-        c1, c2, c3, c4 = st.columns(4)
-        c1.metric("Total rows", len(df))
-        c2.metric("Open", open_n)
-        c3.metric("In Progress", inprog_n)
-        c4.metric("Closed", closed_n)
-
-        _suffix = {
-            "special": "NCR_Log",
-            "special_time": "Time_Sensitive_NCR_Log",
-            "special_closeout": "Project_Closeout_NCR_Log",
-            "regular": "Site_Inspection_Log",
-            "regular_time": "Time_Sensitive_Site_Inspection_Log",
-        }.get(profile_key, "Log")
-        out_name = f"{(project.strip() or 'TT').replace(' ', '_')}_{_suffix}.xlsx"
-        st.download_button(
-            "⬇ Download completed Excel workbook",
-            data=xlsx,
-            file_name=out_name,
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            type="primary",
-        )
-
-        # Every log: landscape PDF of the open items, exactly as the workbook opens
-        import log_pdf
-        try:
-            _log_pdf = log_pdf.build_log_pdf(xlsx, _profile)
-        except Exception as e:  # noqa: BLE001 - the Excel download above still works
-            _log_pdf = None
-            st.warning(f"The log PDF couldn't be created: {e}")
-        if _log_pdf:
-            st.download_button(
-                "📄 Download log PDF",
-                data=_log_pdf,
-                file_name=out_name.replace(".xlsx", ".pdf"),
-                mime="application/pdf",
-                help="US Letter landscape with 0.5 in margins. Shows the open items as the Excel log "
-                     "opens, with the same colours and legend. All columns fit the page width; "
-                     "longer logs continue onto more pages with the column headers repeated.",
-            )
-
-        # Time Sensitive logs: one-page PDF summary of open items by age band
-        if _profile.age_highlight:
-            import summary_pdf
-            st.subheader("Summary PDF")
-            _pdf = summary_pdf.build_summary_pdf(df, _profile, project.strip() or "134 Jane Street")
-            st.download_button(
-                "📄 Generate summary PDF",
-                data=_pdf,
-                file_name=out_name.replace(".xlsx", "_Summary.pdf"),
-                mime="application/pdf",
-                help="One-page summary of open items in each age category, with the project name "
-                     "and today's date as the date of distribution.",
-            )
-    else:
-        st.info("Awaiting a CSV upload to begin.")
+def _apply_type_highlight(ws, profile, n, last_row, last_col_letter):
+    """Shade whole data rows by NCR Type (TR-1 / TR-8 / QA/QC)."""
+    t = profile.column_map["Type"]
+    if n > 0:
+        rng = f"A{DATA_START_ROW}:{last_col_letter}{last_row}"
+        for value, _name, fill in TYPE_FILLS:
+            ws.conditional_formatting.add(rng, FormulaRule(
+                formula=[f'EXACT(UPPER(TRIM(${t}{DATA_START_ROW})),"{value}")'], fill=fill, stopIfTrue=True))
+    rows = [(v, fill) for v, _name, fill in TYPE_FILLS] + [("Other / blank type (no highlight)", None)]
+    _write_legend(ws, profile, "Legend: NCR Type", rows)
 
 
-def _invalidate_captions():
-    st.session_state.cap_pdf = None
+def _apply_open_filter(ws, profile, n, last_row):
+    """Open the log filtered to non-Closed items; returns how many closed rows are hidden.
+
+    Uses an Excel custom filter "Status does not equal Closed and does not equal Close",
+    so blank / Open / In Progress (or any other status) stay visible, and re-applying the
+    filter in Excel after editing a status hides newly closed items too. Closed rows are
+    hidden, not deleted: Select All in the Status filter brings them back. Applied even
+    when every item is closed, so a download never opens showing closed items.
+    """
+    letter = get_column_letter(profile.status_col)
+    hidden = [
+        r for r in range(DATA_START_ROW, last_row + 1)
+        if str(ws[f"{letter}{r}"].value or "").strip().lower() in CLOSED_WORDS
+    ]
+    ws.auto_filter.filterColumn.append(FilterColumn(
+        colId=profile.status_col - 1,
+        customFilters=CustomFilters(_and=True, customFilter=[
+            CustomFilter(operator="notEqual", val=word.capitalize()) for word in CLOSED_WORDS
+        ]),
+    ))
+    for r in hidden:
+        ws.row_dimensions[r].hidden = True
+    return len(hidden)
 
 
-def _move_photo(group_key, photo, pos_key, k):
-    """Move a photo to the position picked for it; the photos in between shift along."""
-    ss = st.session_state
-    order = ss.cap_order[group_key]
-    new = int(ss[pos_key]) - 1
-    if photo not in order or not 0 <= new < len(order) or order.index(photo) == new:
-        return
-    order.remove(photo)
-    order.insert(new, photo)
-    for position, other in enumerate(order, start=1):
-        ss[f"cap_pos_{k}_{other}"] = position
-    _invalidate_captions()
+def _write_legend(ws, profile, title, rows):
+    """Colour key in rows 1-5: swatch in one column, meaning in the next.
+
+    Column pair comes from Profile.legend_cols; fills come from the same constants
+    as the highlighting rules, so the key always matches the rows.
+    """
+    sw_col, lab_col, *rest = profile.legend_cols
+    lab_end = rest[0] if rest else lab_col
+    lab_cols = range(column_index_from_string(lab_col), column_index_from_string(lab_end) + 1)
+    head = ws[f"{sw_col}1"]
+    head.value = title
+    head.font = Font(name="Arial", size=10, bold=True)
+    head.alignment = Alignment(horizontal="left", vertical="center")
+    for c in range(column_index_from_string(sw_col), lab_cols[-1] + 1):
+        ws.cell(1, c).border = THIN_BORDER
+    ws.merge_cells(f"{sw_col}1:{lab_end}1")
+
+    for r, (text, fill) in enumerate(rows, start=2):
+        swatch, label = ws[f"{sw_col}{r}"], ws[f"{lab_col}{r}"]
+        swatch.border = THIN_BORDER
+        if fill is not None:
+            swatch.fill = fill
+        label.value = text
+        label.font = Font(name="Arial", size=10)
+        label.alignment = Alignment(horizontal="left", vertical="center")
+        for c in lab_cols:
+            ws.cell(r, c).border = THIN_BORDER
+        if len(lab_cols) > 1:
+            ws.merge_cells(f"{lab_col}{r}:{lab_end}{r}")
 
 
-def _reset_photo_order(group_key, original, k):
-    ss = st.session_state
-    ss.cap_order[group_key] = list(original)
-    for position, photo in enumerate(original, start=1):
-        ss[f"cap_pos_{k}_{photo}"] = position
-    _invalidate_captions()
+# ---------------------------------------------------------------- summary sheet
+_S_GRAY, _S_OLIVE, _S_MUTED, _S_RULE = "FF42424A", "FF839058", "FF6E6E76", "FFC9C9CC"
 
 
-def render_captions():
-    """Caption tool: post-processed report PDF → captioned PDF copy."""
-    import hashlib
-    import importlib
-    import caption_engine as _ce
-    if getattr(_ce, "ENGINE_VERSION", None) != _CAPTION_ENGINE_VERSION:
-        _ce = importlib.reload(_ce)   # Streamlit can keep an old copy in memory after a code update
-    from caption_engine import (
-        MAX_SIGNATURES, CaptionJob, analyze_pdf, apply_captions, apply_signatures,
-        caption_font_for, find_signature_box, format_caption, group_photos, photo_previews,
-        reorder_photos,
-    )
+def _summary_grid(card_px=173, gap_px=18):
+    """Column grid where a 4-card row and a 3-card row both span the same width.
 
-    ss = st.session_state
-    field_label(
-        _PAPERCLIP_B64, "Upload site visit report (PDF)",
-        tip="Upload the post-processed TT report PDF. Only pages headed \u201cPhotographs:\u201d are "
-            "edited; every other page is left as is. You review each photo before export, and "
-            "the download is a separate copy, so the original file isn't changed.",
-    )
-    uploaded = st.file_uploader("Upload site visit report (PDF)", type=["pdf"],
-                                label_visibility="collapsed", key="cap_upload")
-    if uploaded is None:
-        st.info("Awaiting a PDF upload to begin.")
-        return
-
-    pdf_bytes = uploaded.getvalue()
-    fingerprint = hashlib.sha256(pdf_bytes).hexdigest()
-    if ss.get("cap_fingerprint") != fingerprint:
-        try:
-            report_no, detected, notes = analyze_pdf(pdf_bytes)
-        except Exception as e:  # noqa: BLE001
-            st.error(f"Could not read the PDF: {e}")
-            st.stop()
-        ss.cap_fingerprint = fingerprint
-        ss.cap_jobs, ss.cap_report_no, ss.cap_notes = detected, report_no, notes
-        ss.cap_pdf, ss.cap_warnings = None, []
-        ss.cap_groups = group_photos(detected)
-        ss.cap_order = {g.key: list(g.jobs) for g in ss.cap_groups}
-        ss.cap_order_note = ""
-        try:
-            ss.cap_previews = photo_previews(pdf_bytes, detected, width=360)
-        except Exception:  # noqa: BLE001 - previews are a convenience only
-            ss.cap_previews = [None] * len(detected)
-    k = fingerprint[:10]          # widget keys are per file, so a new upload starts fresh
-
-    st.subheader("1. Confirm report and observations")
-    field_label(_MAGNIFIER_B64, "Report number",
-                tip="Detected from \u201cSpecial Inspection Report #\u2026\u201d in the PDF. Change it if needed.")
-    report_no = st.text_input("Report number", value=ss.cap_report_no, key=f"cap_report_{k}",
-                              label_visibility="collapsed", on_change=_invalidate_captions).strip()
-
-    for note in ss.cap_notes:
-        st.warning(note)
-    jobs: list[CaptionJob] = ss.cap_jobs
-    if not jobs:
-        st.error("No photos were found. The report needs embedded photos on pages headed \u201cPhotographs:\u201d.")
-        st.stop()
-
-    groups = ss.cap_groups
-    st.success(f"Detected {len(jobs)} photo(s) in {len(groups)} observation(s) across "
-               f"{len({j.page_index for j in jobs})} photo page(s).")
-    if any(j.warning for j in jobs):
-        st.warning("Some photos couldn\u2019t be linked to an observation. Check them below before exporting.")
-    st.caption("Photos are shown in the same grid as the report, numbered from the top left across "
-               "each row. Pick a new position for any photo to reorder it within its observation; "
-               "the other photos shift along. Each photo keeps its own description.")
-
-    options = ["NCR", "GO", "Skip"]
-    for g_index, group in enumerate(groups):
-        order = ss.cap_order[group.key]
-        first = jobs[group.jobs[0]]
-        default = first.observation_type if first.observation_type in {"NCR", "GO"} else "Skip"
-        with st.container(border=True):
-            pages = ", ".join(str(p) for p in group.pages)
-            st.markdown(f"**{group.title(report_no)}**")
-            st.caption(f"{len(group.jobs)} photo{'s' if len(group.jobs) != 1 else ''} \u00b7 "
-                       f"page{'s' if len(group.pages) != 1 else ''} {pages}")
-            c1, c2, c3 = st.columns([1.35, 0.9, 1.2])
-            with c1:
-                try:
-                    kind = st.segmented_control(
-                        "Observation type", options, default=default, key=f"cap_gkind_{k}_{g_index}",
-                        on_change=_invalidate_captions,
-                    ) or default            # clicking the active button again keeps a selection
-                except AttributeError:      # older Streamlit without segmented_control
-                    kind = st.radio("Observation type", options, index=options.index(default),
-                                    horizontal=True, key=f"cap_gkind_{k}_{g_index}",
-                                    on_change=_invalidate_captions)
-            with c2:
-                obs = st.text_input("Observation #", value=first.observation_number,
-                                    key=f"cap_gobs_{k}_{g_index}", help="Numbers only, e.g. 1.",
-                                    on_change=_invalidate_captions).strip()
-            with c3:
-                if order != group.jobs:
-                    st.button("Reset photo order", key=f"cap_reset_{k}_{g_index}",
-                              on_click=_reset_photo_order, args=(group.key, list(group.jobs), k))
-            if first.warning:
-                st.warning(first.warning)
-            # One cell per grid slot, in the report's layout: left to right, then down.
-            positions = list(range(1, len(order) + 1))
-            for row_start in range(0, len(order), group.columns):
-                cells = st.columns(group.columns)
-                for offset, photo in enumerate(order[row_start:row_start + group.columns]):
-                    position = row_start + offset + 1
-                    slot_job = jobs[group.jobs[position - 1]]
-                    job = jobs[photo]
-                    with cells[offset]:
-                        preview = ss.cap_previews[photo] if photo < len(ss.cap_previews) else None
-                        if preview:
-                            st.image(preview)
-                        pos_key = f"cap_pos_{k}_{photo}"
-                        if ss.get(pos_key) != position:
-                            ss[pos_key] = position
-                        st.selectbox(
-                            "Photo position", positions, key=pos_key,
-                            on_change=_move_photo, args=(group.key, photo, pos_key, k),
-                            help="Where this photo sits in the observation's grid. Photo 1 is top "
-                                 "left, photo 2 top right, photo 3 the left side of row 2, and so on, "
-                                 "continuing onto the next page if the photos run over.",
-                        )
-                        caption = st.text_input("Photo description", value=job.caption,
-                                                key=f"cap_text_{k}_{photo}",
-                                                help="Keep or edit the description already under the photo.",
-                                                on_change=_invalidate_captions).strip()
-                        if kind != "Skip" and report_no and obs:
-                            try:
-                                st.caption(format_caption(report_no, kind, obs, slot_job.photo_number, caption))
-                            except ValueError as exc:
-                                st.caption(str(exc))
-                        else:
-                            st.caption("Skipped until the observation type and number are set.")
-                        if photo != group.jobs[position - 1]:
-                            st.caption(f"Originally photo {group.jobs.index(photo) + 1}")
-                        job.caption = caption
-            for photo in group.jobs:
-                jobs[photo].observation_type = None if kind == "Skip" else kind
-                jobs[photo].observation_number = obs
-
-    st.subheader("2. Add signatures (optional)")
-    if ss.get("cap_sig_fp") != fingerprint:
-        ss.cap_sig_fp, ss.cap_sig_box = fingerprint, find_signature_box(pdf_bytes)
-    sig_box = ss.cap_sig_box
-    field_label(
-        _PAPERCLIP_B64, "Signature images (up to 2)",
-        tip="Upload PNG or JPG signature images. Each is trimmed, its white or paper background is "
-            "removed, and it is scaled to fit inside the \u201cSigned:\u201d box without touching the "
-            "Date box. Two signatures are placed side by side.",
-    )
-    sig_files = st.file_uploader("Signature images (up to 2)", type=["png", "jpg", "jpeg"],
-                                 accept_multiple_files=True, label_visibility="collapsed",
-                                 key=f"cap_sigs_{k}", on_change=_invalidate_captions) or []
-    if sig_box is None:
-        st.caption("No \u201cSigned:\u201d box was found in this report, so signatures can\u2019t be added.")
-    elif not sig_files:
-        st.caption(f"Signature box found on page {sig_box.page_number}. Leave this empty to export unsigned.")
-    if len(sig_files) > MAX_SIGNATURES:
-        st.error(f"Upload no more than {MAX_SIGNATURES} signature images \u2014 remove "
-                 f"{len(sig_files) - MAX_SIGNATURES} to continue.")
-
-    st.subheader("3. Section boxes")
-    import section_boxes as _sb
-    if ss.get("cap_box_fp") != fingerprint:
-        try:
-            _doc = __import__("fitz").open(stream=pdf_bytes, filetype="pdf")
-            ss.cap_box_plan = _sb.plan_boxes(_doc)
-            _doc.close()
-        except Exception:  # noqa: BLE001 - boxing is optional; never block captions
-            ss.cap_box_plan = ([], [])
-        ss.cap_box_fp = fingerprint
-    _box_plans, _box_titles = ss.cap_box_plan
-    if _box_titles:
-        add_boxes = st.checkbox(
-            "Add grey boxes to the summary subsections (General Observations, Follow-Up Items, "
-            "Action Items and Summary of Observations)",
-            value=True, key=f"cap_boxes_{k}", on_change=_invalidate_captions,
-            help="Boxes each subheading and its content in the report's table style (#DDDDDD, 0.7 pt). "
-                 "Main headings stay unboxed, boxes close and reopen at page breaks, and text inside "
-                 "them is inset 1.5 pt so it clears the borders.",
-        )
-        st.caption("Unboxed subsections found: " + " · ".join(t.rstrip(":") for t in _box_titles))
-    else:
-        add_boxes = False
-        st.caption("Every subsection in this report is already boxed, so nothing will be added.")
-    tighten = st.checkbox(
-        "Tighten spacing",
-        value=True, key=f"cap_tighten_{k}", on_change=_invalidate_captions,
-        help="Closes up extra space so the report reads evenly: oversized gaps between items in the "
-             "summary sections, and empty space at the bottom (or top) of table cells such as Attendees, "
-             "Reference Submittals and the Executive Summary. Location plan cells are trimmed to the "
-             "bottom of the plans. When a summary section continues on the next page and the page "
-             "before has room above the bottom margin, the next lines move up to fill it, keeping "
-             "the normal spacing between list items. Photo pages are never moved, and every changed "
-             "page is checked against the original before it is used.",
-    )
-
-    st.subheader("4. Generate captioned PDF")
-    if st.button("Apply captions", type="primary",
-                 help="Captions are left-aligned under each photo. If any caption needs a smaller "
-                      "font to clear the next photo row, every caption uses that same size."):
-        if not report_no:
-            st.error("Enter the report number before exporting.")
-        elif len(sig_files) > MAX_SIGNATURES:
-            pass   # the error above the button already explains this
-        else:
-            with st.spinner("Applying captions to the photo pages\u2026"):
-                orders = {g.key: list(ss.cap_order[g.key]) for g in groups}
-                ordered_pdf, export_jobs, ss.cap_order_note = pdf_bytes, jobs, ""
-                if any(orders[g.key] != g.jobs for g in groups):
-                    ordered_pdf, export_jobs, _order_notes = reorder_photos(pdf_bytes, jobs, orders, groups)
-                    ss.cap_order_note = " ".join(_order_notes)
-                ss.cap_font = caption_font_for(ordered_pdf, export_jobs, report_no)
-                ss.cap_stats = {}
-                source = ordered_pdf
-                ss.cap_box_count = 0
-                ss.cap_spacing_notes = []
-                _sb_current = hasattr(_sb, "flow_across_pages")
-                if not _sb_current and tighten:
-                    st.warning("Spacing wasn\u2019t tightened: section_boxes.py in the app\u2019s repo is an "
-                               "older version. Replace it with the one from the latest package.")
-                if _sb_current and (add_boxes or tighten):
-                    _boxed = _sb.apply_section_boxes(ordered_pdf, tighten=tighten, boxes=add_boxes,
-                                                     protect_pages={j.page_index for j in jobs})
-                    source, ss.cap_box_count = _boxed.pdf, len(_boxed.sections)
-                    ss.cap_spacing_notes = _boxed.warnings if tighten else []
-                elif add_boxes:
-                    try:
-                        _boxed = _sb.apply_section_boxes(ordered_pdf)
-                    except Exception:
-                        _boxed = None
-                    if _boxed is None:
-                        st.warning("Section borders weren\u2019t added: section_boxes.py in the app\u2019s repo "
-                                   "doesn\u2019t match app.py. Replace both with the files from the latest package.")
-                        _boxed = type("R", (), {"pdf": ordered_pdf, "sections": []})()
-                    source, ss.cap_box_count = _boxed.pdf, len(_boxed.sections)
-                ss.cap_pdf, ss.cap_warnings = apply_captions(source, export_jobs, report_no, font=ss.cap_font,
-                                                             stats=ss.cap_stats)
-                ss.cap_sig_info = None
-                if sig_files and sig_box is not None:
-                    ss.cap_pdf, sig_warnings, ss.cap_sig_info = apply_signatures(
-                        ss.cap_pdf, [f.getvalue() for f in sig_files])
-                    ss.cap_warnings = list(ss.cap_warnings) + sig_warnings
-
-    if ss.get("cap_pdf"):
-        if ss.cap_warnings:
-            with st.expander(f"Review {len(ss.cap_warnings)} export note(s)", expanded=True):
-                for w in ss.cap_warnings:
-                    st.warning(w)
-        else:
-            st.success("Captioned PDF is ready. No layout warnings were reported.")
-        _stats = ss.get("cap_stats") or {}
-        if _stats.get("page_numbers_found"):
-            st.caption(f"Page numbers resized to 8 pt: {_stats['page_numbers_resized']} of "
-                       f"{_stats['page_numbers_found']} (\u201cPage X of Y\u201d, all {_stats['pages']} pages checked). "
-                       f"Caption prefixes are bold. Engine {_ce.ENGINE_VERSION}")
-        else:
-            st.caption("No \u201cPage X of Y\u201d page numbers were found in this report, so they were left "
-                       f"unchanged. Caption prefixes are bold. Engine {_ce.ENGINE_VERSION}")
-        if ss.get("cap_order_note"):
-            st.caption(ss.cap_order_note)
-        if ss.get("cap_box_count"):
-            st.caption(f"Grey boxes added to {ss.cap_box_count} subsection(s).")
-        _spacing = ss.get("cap_spacing_notes") or []
-        if _spacing:
-            with st.expander(f"Spacing changes ({len(_spacing)})"):
-                for _note in _spacing:
-                    st.caption(_note)
-        _sig = ss.get("cap_sig_info")
-        if _sig and _sig.get("placed"):
-            import fitz
-            _page = fitz.open(stream=ss.cap_pdf, filetype="pdf")[_sig["page"] - 1]
-            _row = fitz.Rect(_sig["area"]); _row.x0 = 20; _row.x1 = (_sig.get("date_cell") or _row)[2] + 8
-            _row.y0 -= 6; _row.y1 += 6
-            st.image(_page.get_pixmap(clip=_row, matrix=fitz.Matrix(3, 3)).tobytes("png"),
-                     caption=f"{_sig['placed']} signature(s) added on page {_sig['page']}")
-        _font = ss.get("cap_font")
-        if _font is not None and _font.is_arial:
-            st.caption(f"Caption font: {_font.label}")
-        elif _font is not None:
-            st.info(f"Arial wasn't available, so captions use {_font.label}, which has the same letter "
-                    "widths and a near-identical look. To use Arial itself, add Arial.ttf to "
-                    "assets/fonts in the repo (check TT's font licence first).")
-        st.download_button(
-            "\u2b07 Download captioned PDF",
-            data=ss.cap_pdf,
-            file_name=f"{Path(uploaded.name).stem}_captioned.pdf",
-            mime="application/pdf",
-            type="primary",
-        )
+    Column edges are the union of both rows' card/gutter edges, so every card is a
+    merge of whole columns. Returns (column widths in Excel units, 4-card spans, 3-card spans).
+    """
+    total = 4 * card_px + 3 * gap_px
+    wide = (total - 2 * gap_px) / 3
+    def spans(n, w):
+        return [(i * (w + gap_px), i * (w + gap_px) + w) for i in range(n)]
+    four, three = spans(4, card_px), spans(3, wide)
+    edges = sorted({round(e, 2) for a, b in four + three for e in (a, b)})
+    widths = [(b - a - 5) / 7 for a, b in zip(edges, edges[1:])]  # px -> Excel char width
+    def cols(row):
+        out = []
+        for a, b in row:
+            first = edges.index(round(a, 2)) + 1
+            last = edges.index(round(b, 2))
+            out.append((get_column_letter(first), get_column_letter(last)))
+        return out
+    return widths, cols(four), cols(three)
 
 
-# --- What would you like to do? ---
-field_label(_TOOLS_B64, "What would you like to do?", tip=_TOOL_TIPS)
-try:
-    tool = st.segmented_control("What would you like to do?", options=[TOOL_CAPTIONS, TOOL_NCR],
-                                default=None, label_visibility="collapsed", key="tool")
-except AttributeError:  # older Streamlit without segmented_control
-    tool = st.radio("What would you like to do?", options=[TOOL_CAPTIONS, TOOL_NCR], index=None,
-                    horizontal=True, label_visibility="collapsed", key="tool")
+_GRID_WIDTHS, _CARDS4, _CARDS3 = _summary_grid()
+_LAST_COL = get_column_letter(len(_GRID_WIDTHS))
 
-if tool == TOOL_CAPTIONS:
-    st.markdown('<hr class="tt-divider">', unsafe_allow_html=True)
-    render_captions()
-elif tool == TOOL_NCR:
-    st.markdown('<hr class="tt-divider">', unsafe_allow_html=True)
-    render_ncr_log()
-else:
-    st.info("Choose a tool above to begin.")
+
+def _sfont(size=10, bold=False, color=_S_GRAY):
+    return Font(name="Arial", size=size, bold=bold, color=color)
+
+
+def _section_row(sm, r, title):
+    sm[f"A{r}"] = title.upper()
+    sm[f"A{r}"].font = _sfont(9, True)
+    rule = Side(style="thin", color=_S_GRAY)
+    for c in range(1, len(_GRID_WIDTHS) + 1):
+        sm.cell(r, c).border = Border(bottom=rule)
+    sm.row_dimensions[r].height = 18
+
+
+def _card_row(sm, top, cards, spans):
+    """Four-row cards: colour band, count, label, detail line (each row merged across the card)."""
+    edge = Side(style="thin", color=_S_RULE)
+    sm.row_dimensions[top].height = 8
+    sm.row_dimensions[top + 1].height = 40
+    sm.row_dimensions[top + 2].height = 16
+    sm.row_dimensions[top + 3].height = 16
+    fonts = [None, _sfont(26, True), _sfont(10, True), _sfont(8, color=_S_MUTED)]
+    for (c1, c2), card in zip(spans, cards):
+        i1, i2 = column_index_from_string(c1), column_index_from_string(c2)
+        for k in range(4):
+            r = top + k
+            if i2 > i1:
+                sm.merge_cells(f"{c1}{r}:{c2}{r}")
+            for ci in range(i1, i2 + 1):
+                cell = sm.cell(r, ci)
+                cell.border = Border(left=edge if ci == i1 else None, right=edge if ci == i2 else None,
+                                     top=edge if k in (0, 1) else None, bottom=edge if k == 3 else None)
+                if k == 0 and card["colour"]:
+                    hexc = "FF" + card["colour"].lstrip("#")
+                    cell.fill = PatternFill(start_color=hexc, end_color=hexc, fill_type="solid")
+            head = sm[f"{c1}{r}"]
+            head.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+            if k:
+                head.value = (card["count"], card["label"], card["detail"])[k - 1]
+                head.font = fonts[k]
+
+
+def _add_summary_sheet(wb, ws, profile, n, project_name):
+    """Summary of the Time Sensitive log, matching the summary PDF.
+
+    Every figure is a formula on the log sheet (same rules as the row highlighting), so
+    editing a Status or the Date Updated cell updates the summary as well.
+    """
+    sm = wb.create_sheet(SUMMARY_SHEET, 0)
+    q = "'" + ws.title.replace("'", "''") + "'!"
+    last = max(DATA_START_ROW + n - 1, DATA_START_ROW)
+    rng = lambda letter: f"{q}${letter}${DATA_START_ROW}:${letter}${last}"
+    S = rng(get_column_letter(profile.status_col))
+    O = rng(profile.column_map["Observation Date"])
+    D = rng(profile.column_map["Date Closed"])
+    R = f"{q}$C$5"
+    not_closed = f'{S},"<>Closed",{S},"<>Close"'
+    log_name = "NCR Log" if profile.key.startswith("special") else "Site Inspection Log"
+    kind = "Special Inspections" if profile.key.startswith("special") else "Regular Site Inspections"
+
+    sm.sheet_view.showGridLines = False
+    for idx, w in enumerate(_GRID_WIDTHS, start=1):
+        sm.column_dimensions[get_column_letter(idx)].width = round(w, 2)
+
+    # Logo, same size and position as the log
+    from PIL import Image as PILImage
+    w_px, h_px = PILImage.open(LOGO_PATH).size
+    width_emu = int(EMU_PER_IN * LOGO_WIDTH_IN)
+    img = XLImage(str(LOGO_PATH))
+    img.anchor = OneCellAnchor(_from=AnchorMarker(col=0, colOff=0, row=0, rowOff=0),
+                               ext=XDRPositiveSize2D(width_emu, int(width_emu * h_px / w_px)))
+    sm.add_image(img)
+
+    sm["A4"] = "Time Sensitive NCR Summary"
+    sm["A4"].font = _sfont(18, True)
+    sm.row_dimensions[4].height = 26
+    sm["A5"] = f"{kind}  ·  Open items by days since observation"
+    sm["A5"].font = _sfont(11, color=_S_OLIVE)
+
+    # Project / distribution details, aligned to the four card columns
+    first = [c1 for c1, _c2 in _CARDS4]
+    for col, label in zip(first, ("Project", "Date of distribution", "Open items", "Closed items")):
+        sm[f"{col}7"] = label.upper()
+        sm[f"{col}7"].font = _sfont(7.5, True, _S_MUTED)
+    p_col, d_col, o_col, c_col = first
+    sm[f"{p_col}8"] = project_name
+    sm[f"{d_col}8"] = f"={R}"
+    sm[f"{d_col}8"].number_format = "mmmm d, yyyy"
+    sm[f"{c_col}8"] = f'=COUNTIF({S},"Closed")+COUNTIF({S},"Close")'
+    sm[f"{o_col}8"] = f"={n}-{c_col}8"
+    open_ref = f"${o_col}$8"
+    rule = Side(style="thin", color=_S_RULE)
+    for ci in range(1, len(_GRID_WIDTHS) + 1):
+        cell = sm.cell(8, ci)
+        cell.font = _sfont(12)
+        cell.alignment = Alignment(horizontal="left", vertical="center")
+        cell.border = Border(bottom=rule)
+    for c1, c2 in _CARDS4:            # merge each detail across its card's columns
+        if c1 != c2:
+            sm.merge_cells(f"{c1}7:{c2}7")
+            sm.merge_cells(f"{c1}8:{c2}8")
+    sm.row_dimensions[8].height = 22
+
+    # Open items by days since observation (same bands as the log highlighting)
+    _section_row(sm, 10, "Open items by days since observation")
+    bounds = [("", f'">"&({R}-30)')] + [
+        (f'"<="&({R}-{lo})', f'">"&({R}-{hi})' if hi else "") for lo, hi, _l, _f in AGE_BANDS]
+    labels = ["Less than 30 days"] + [f"{lo}–{hi - 1} days" if hi else f"{lo}+ days" for lo, hi, _l, _f in AGE_BANDS]
+    colours = [None] + ["#" + f.fgColor.rgb[-6:] for _lo, _hi, _l, f in AGE_BANDS]
+    details = ["Not highlighted in log", "Highlighted yellow in log",
+               "Highlighted orange in log", "Highlighted red in log"]
+    cards = []
+    for (upper, lower), label, colour, detail in zip(bounds, labels, colours, details):
+        crit = "".join(f",{O},{c}" for c in (upper, lower) if c)
+        cards.append({"count": f"=COUNTIFS({not_closed}{crit})", "label": label,
+                      "colour": colour, "detail": detail})
+    _card_row(sm, 12, cards, _CARDS4)
+    age_counts = ",".join(f"{c1}13" for c1, _c2 in _CARDS4)
+
+    # Items closed recently: three separate bands plus a 90-day total
+    _section_row(sm, 17, "Items closed recently")
+    cards = []
+    for lo, hi, label, colour in (*CLOSED_BANDS, CLOSED_TOTAL):
+        a, b = f"({R}-{hi})", f"({R}-{lo})"
+        win = f'{D},">="&{a},{D},"<="&{b}'
+        cards.append({
+            "count": f'=COUNTIFS({S},"Closed",{win})+COUNTIFS({S},"Close",{win})',
+            "label": label, "colour": colour,
+            "detail": (f'=TEXT({a},IF(YEAR({a})=YEAR({b}),"mmm d","mmm d, yyyy"))'
+                       f'&" – "&TEXT({b},"mmm d, yyyy")'),
+        })
+    _card_row(sm, 19, cards, _CARDS4)
+    sm["A23"] = ("The first three counts do not overlap; the total is their sum. "
+                 "Based on each item's Date Closed.")
+    sm["A23"].font = _sfont(8, color=_S_MUTED)
+
+    # Notes (live)
+    _section_row(sm, 25, "Notes")
+    oldest = f'_xlfn.MINIFS({O},{not_closed})'
+    notes = [
+        f'="•  Ages are counted from each item’s Observation Date to the date of distribution ("'
+        f'&TEXT({R},"mmmm d, yyyy")&"), the same rule used to highlight the Time Sensitive {log_name}."',
+        "•  Open items include anything not marked Closed (Open and In Progress).",
+        f'="•  Closed items are excluded from the age counts: "&{c_col}8&" of {n} items in this log."',
+        f'=IF(OR({open_ref}=0,{oldest}=0),"","•  Oldest open item: "&({R}-{oldest})&" days, observed "&TEXT({oldest},"mmmm d, yyyy")&".")',
+        f'=IF({open_ref}-SUM({age_counts})>0,"•  "&({open_ref}-SUM({age_counts}))&" open item(s) have no valid Observation Date and cannot be aged.","")',
+    ]
+    for i, text in enumerate(notes):
+        r = 27 + i
+        sm.merge_cells(f"A{r}:{_LAST_COL}{r}")
+        sm[f"A{r}"] = text
+        sm[f"A{r}"].font = _sfont(9.5)
+        sm[f"A{r}"].alignment = Alignment(horizontal="left", vertical="top", wrap_text=True)
+        sm.row_dimensions[r].height = 26 if i == 0 else 15
+
+    # Print: one page, portrait
+    sm.page_setup.orientation = "portrait"
+    sm.page_setup.fitToWidth = 1
+    sm.page_setup.fitToHeight = 1
+    sm.sheet_properties.pageSetUpPr.fitToPage = True
+    sm.print_area = f"A1:{_LAST_COL}32"
+
+    # Open on the summary (and don't leave the log tab grouped with it)
+    ws.sheet_view.tabSelected = False
+    wb.active = 0
+
+
+def build_workbook(df: pd.DataFrame, profile: Profile, project_name: str = "134 Jane Street") -> bytes:
+    wb = load_workbook(ASSETS / profile.template)
+    ws = wb.worksheets[0]
+    ws.title = SHEET_TITLES.get(profile.key, "Log")
+    ws._images = []  # we place exactly one logo
+    _fit_link_column(ws, profile)
+
+    first_col, last_col = 1, profile.last_col
+    status_col = profile.status_col
+
+    # Header cells
+    ws["A4"] = project_name
+    ws["C5"] = date.today().strftime("%Y-%m-%d")
+
+    # Data rows (resolve each field through aliases)
+    n = len(df)
+    resolved = {fld: _resolve_field(fld, df) for fld in profile.column_map}
+    for i, (_, row) in enumerate(df.iterrows()):
+        r = DATA_START_ROW + i
+        for fld, col_letter in profile.column_map.items():
+            src = resolved[fld]
+            if src is not None:
+                ws[f"{col_letter}{r}"] = _coerce(row[src])
+
+    # Center fixed columns
+    for i in range(n):
+        r = DATA_START_ROW + i
+        for c in profile.center_columns:
+            cell = ws.cell(r, c)
+            al = copy(cell.alignment)
+            cell.alignment = Alignment(horizontal="center", vertical="center",
+                                       wrap_text=True, text_rotation=al.text_rotation,
+                                       indent=al.indent)
+
+    # Text columns: left aligned, vertically centered, wrapped
+    text_cols = [profile.column_map[f] for f in TEXT_FIELDS if f in profile.column_map]
+    for i in range(n):
+        r = DATA_START_ROW + i
+        for col_letter in text_cols:
+            cell = ws[f"{col_letter}{r}"]
+            cell.alignment = Alignment(horizontal="left", vertical="center", wrap_text=True)
+
+    # Borders: thin on all data cells; thick on header row only
+    for r in range(DATA_START_ROW, DATA_START_ROW + n):
+        for c in range(first_col, last_col + 1):
+            ws.cell(r, c).border = THIN_BORDER
+    for c in range(first_col, last_col + 1):
+        ws.cell(HEADER_ROW, c).border = THICK_BORDER
+
+    # Font: 10pt everywhere (title, headers, data), preserving bold/name/color
+    for r in range(TITLE_ROW, DATA_START_ROW + n):
+        for c in range(first_col, last_col + 1):
+            cell = ws.cell(r, c)
+            f = cell.font
+            cell.font = Font(name=f.name, size=FONT_SIZE, bold=f.bold,
+                             italic=f.italic, color=f.color, underline=f.underline)
+
+    # Filter on the header row
+    last_row = DATA_START_ROW + n - 1
+    last_col_letter = get_column_letter(last_col)
+    ws.auto_filter.ref = f"A{HEADER_ROW}:{last_col_letter}{last_row}"
+
+    # Dropdown on the Status column
+    status_letter = get_column_letter(status_col)
+    dv = DataValidation(type="list", formula1='"' + ",".join(STATUS_OPTIONS) + '"',
+                        allow_blank=True, showDropDown=False)
+    dv.error = "Choose Open, In Progress, or Closed."
+    dv.errorTitle = "Invalid status"
+    dv.prompt = "Select a status"
+    ws.add_data_validation(dv)
+    dv.add(f"{status_letter}{DATA_START_ROW}:{status_letter}{last_row}")
+
+    # Live Status-cell highlighting (recolors on dropdown change). Turned off for logs
+    # whose rows are shaded by another rule, so that colour runs across the whole row.
+    if profile.status_colors:
+        status_range = f"{status_letter}{DATA_START_ROW}:{status_letter}{last_row}"
+        top = f"{status_letter}{DATA_START_ROW}"
+        ws.conditional_formatting.add(status_range,
+            FormulaRule(formula=[f'EXACT(LOWER(TRIM({top})),"open")'], fill=OPEN_FILL, stopIfTrue=True))
+        ws.conditional_formatting.add(status_range,
+            FormulaRule(formula=[f'EXACT(LOWER(TRIM({top})),"in progress")'], fill=INPROGRESS_FILL, stopIfTrue=True))
+        ws.conditional_formatting.add(status_range,
+            FormulaRule(formula=[f'EXACT(LOWER(TRIM({top})),"closed")'], fill=CLOSED_FILL, stopIfTrue=True))
+
+    if profile.age_highlight:
+        _apply_age_highlight(ws, profile, n, last_row, last_col_letter)
+    if profile.type_highlight:
+        _apply_type_highlight(ws, profile, n, last_row, last_col_letter)
+    hidden_closed = _apply_open_filter(ws, profile, n, last_row) if profile.filter_open and n else 0
+
+    # Logo, exactly 3in wide, top-left corner
+    from PIL import Image as PILImage
+    w_px, h_px = PILImage.open(LOGO_PATH).size
+    width_emu = int(EMU_PER_IN * LOGO_WIDTH_IN)
+    height_emu = int(width_emu * h_px / w_px)
+    img = XLImage(str(LOGO_PATH))
+    img.anchor = OneCellAnchor(_from=AnchorMarker(col=0, colOff=0, row=0, rowOff=0),
+                               ext=XDRPositiveSize2D(width_emu, height_emu))
+    ws.add_image(img)
+
+    # Keep the title block and column headers visible while scrolling
+    ws.freeze_panes = FREEZE_CELL
+
+    # Time Sensitive logs: live summary sheet first, log second
+    if profile.age_highlight:
+        _add_summary_sheet(wb, ws, profile, n, project_name)
+
+    # Audit sheet
+    audit = wb.create_sheet(AUDIT_SHEET)
+    for idx, (k, v) in enumerate([
+        ("Generated", datetime.now().strftime("%Y-%m-%d %H:%M:%S")),
+        ("Inspection type", profile.label),
+        ("Aging reference date", ws["C5"].value.strftime("%Y-%m-%d") if profile.age_highlight else "n/a"),
+        ("Template", profile.template),
+        ("PlanRadar link column", "Included" if LINK_FIELD in profile.column_map else "Omitted (no PlanRadar access)"),
+        ("Default filter", f"Open items only ({hidden_closed} closed hidden)" if profile.filter_open and n else "None"),
+        ("Rows imported", n),
+        ("Project", project_name),
+    ], start=1):
+        audit[f"A{idx}"] = k
+        audit[f"B{idx}"] = v
+
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
+def process_csv_bytes(csv_bytes: bytes, inspection_type: str = DEFAULT_PROFILE,
+                      project_name: str = "134 Jane Street", planradar_access: bool = True):
+    """Full pipeline. Returns (xlsx_bytes_or_None, df, messages).
+
+    planradar_access: True adds the PlanRadar "Link to ticket" column, False leaves it out.
+    """
+    profile = with_planradar_link(get_profile(inspection_type), planradar_access)
+    df = pd.read_csv(io.BytesIO(csv_bytes), dtype=str).fillna("")
+    ok, msgs = validate(df, profile)
+    if not ok:
+        return None, df, msgs
+    xlsx = build_workbook(df, profile, project_name=project_name)
+    return xlsx, df, msgs
