@@ -1,4 +1,4 @@
-[README.md](https://github.com/user-attachments/files/34993338/README.md)
+[README.md](https://github.com/user-attachments/files/34993725/README.md)
 # Site Visit Post-Processing Tools
 
 A Thornton Tomasetti web app for finishing PlanRadar site visit outputs. After the title, the app asks **What would you like to do?** and runs one of two tools:
@@ -15,7 +15,7 @@ A Thornton Tomasetti web app for finishing PlanRadar site visit outputs. After t
 * Edits only pages headed **Photographs:**; every other page is left as is
 * Links each photo to the observation on the preceding detail page (NCR or GO)
 * Photos are reviewed one observation at a time: each observation ticket (e.g. `67.NCR.1`, `67.GO.1`) gets one card with small previews of its photos, laid out in the same grid as the PDF
-* Photos can be reordered within their observation: drag a photo onto another position (or select it and use the arrow keys) and the others shift along. The drag-and-drop grid is a small built-in component in `components/photo_grid/`; if that folder is missing, the app falls back to a position dropdown under each photo. Positions run from the top left across each row (photo 1 top left, photo 2 top right, photo 3 left side of row 2, and so on), including onto the next page when an observation's photos run over. **Reset photo order** puts them back
+* Photos can be reordered within their observation: drag a photo onto another position (or select it and use the arrow keys) and the others shift along. The drag-and-drop grid is a small built-in component in `components/photo_grid/`; if that folder is missing, or the “Drag-and-drop photo order” switch is turned off, the app uses a position dropdown under each photo instead. Positions run from the top left across each row (photo 1 top left, photo 2 top right, photo 3 left side of row 2, and so on), including onto the next page when an observation's photos run over. **Reset photo order** puts them back
 * Each photo keeps its own description when it moves; its photo number becomes its new position
 * Caption format: `REPORT.NCR.OBS-n: detail description` (or `GO` for general observations), where `n` is the photo number
 * Captions are left-aligned under each photo; if any caption needs a smaller font to clear the next photo row, every caption uses that same size
